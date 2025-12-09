@@ -1069,5 +1069,6 @@ def render_program(prog):
         else:
             print(token)
             raise RenderError("unidentified token: " + token)
-            
-    draw_world(w, line_width=1.2,  sf=0.3)
+
+    fig = draw_world(w, line_width=1.2,  sf=0.3)
+    return fig
