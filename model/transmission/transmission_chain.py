@@ -3,6 +3,15 @@ from typing import Dict, List, Sequence, Optional
 
 import numpy as np
 
+# Import DSL utilities for AST-based operations
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+from model.dsl import Node, tokens_to_ast, ast_to_tokens, set_library
+from model.dsl.fragments import Library
+from model.program_induction import discover_fragments, apply_fragments, fragment_usage
+from model.eval import ib_loss, ib_complexity, ib_accuracy
+
 
 # Global configuration and example DSL
 
@@ -205,5 +214,451 @@ class TransmissionChain:
             current = self.transmit_once(current)
             chain.append(current)
         return chain
+
+
+def run_chain_with_selection(
+    model: TransmissionChain,
+    true_program: Sequence[str],
+    num_generations: int,
+    lambda_compression: float = 0.3,
+    num_candidates: int = 5,
+    temperature: float = 0.0,
+) -> List[List[str]]:
+    """
+    Run a transmission chain with simple selection over noisy candidates.
+
+    At each generation, we:
+    - Generate several candidate variants from the current program using
+      the model's transmit_once (plus the identity candidate).
+    - Score each candidate with a loss that trades off sequence accuracy
+      against normalized length using relative compression ratio.
+    - Choose the next program as either the argmin-loss candidate
+      (temperature=0) or via a softmax over negative loss (temperature>0).
+    
+    The loss function (for consistency with AST-level IB loss) is:
+        loss = compression_penalty - lambda * accuracy
+    
+    where compression_penalty is normalized relative to the true program length:
+        compression_penalty = max(0, (L - base_length) / base_length)
+    
+    Note: This is mathematically equivalent to utility = accuracy - lambda * penalty,
+    but using loss makes the concept consistent with IB loss (lower is better).
+    
+    This ensures that:
+    - Programs shorter than base_length get no penalty (or even bonus)
+    - Longer programs get increasing penalty
+    - The penalty scales relative to base_length, keeping lambda interpretable
+    """
+    if num_candidates < 1:
+        raise ValueError("num_candidates must be at least 1.")
+
+    base_true = expand_program(true_program)
+    base_length = len(base_true) if base_true else 1
+
+    chain: List[List[str]] = [list(true_program)]
+    current: List[str] = list(true_program)
+
+    for _ in range(num_generations):
+        candidates: List[List[str]] = [list(current)]
+        # Generate additional noisy candidates
+        for _ in range(num_candidates - 1):
+            candidates.append(model.transmit_once(current))
+
+        losses: List[float] = []
+        # Compute normalized lengths for all candidates (for dynamic normalization)
+        candidate_lengths = [expanded_length(cand) for cand in candidates]
+        max_length = max(candidate_lengths) if candidate_lengths else base_length
+        min_length = min(candidate_lengths) if candidate_lengths else base_length
+        
+        for cand in candidates:
+            acc = sequence_accuracy(true_program, cand)
+            L = expanded_length(cand)
+            
+            # Relative compression penalty (relative to base_length)
+            # Penalty = 0 if L <= base_length, increases if L > base_length
+            compression_penalty = max(0.0, (L - base_length) / float(base_length))
+            
+            # Loss = penalty - lambda * accuracy (lower is better)
+            # This is equivalent to utility = accuracy - lambda * penalty,
+            # but using loss makes it consistent with IB loss concept
+            loss = compression_penalty - lambda_compression * acc
+            losses.append(loss)
+
+        # Selection: argmin loss or softmax over negative loss
+        if temperature <= 0.0:
+            best_idx = min(range(len(candidates)), key=lambda i: losses[i])
+        else:
+            # Softmax over negative loss (convert loss to probability)
+            # Lower loss -> higher probability
+            neg_losses = np.array([-l for l in losses], dtype=float) / float(temperature)
+            # Numerical stability
+            neg_losses -= np.max(neg_losses)
+            probs = np.exp(neg_losses)
+            probs /= probs.sum()
+            r = model.random.random()
+            cum = 0.0
+            best_idx = 0
+            for i, p in enumerate(probs):
+                cum += float(p)
+                if r <= cum:
+                    best_idx = i
+                    break
+
+        current = list(candidates[best_idx])
+        chain.append(current)
+
+    return chain
+
+
+
+# Tiny Bayesian lexicon model (inspired by notebook 3)
+
+
+
+class TinyLexicon:
+    """
+    Simple lexicon mapping meanings to words.
+
+    meanings: list of meaning identifiers (e.g., scene keys like 'CL')
+    words: list of word strings (e.g., ['w1', 'w2', 'w3'])
+    mapping: dict from meaning -> word
+    """
+
+    def __init__(self, meanings: Sequence[str], words: Sequence[str], mapping: Dict[str, str]):
+        self.meanings = list(meanings)
+        self.words = list(words)
+        self.mapping = dict(mapping)
+
+    def word_for(self, meaning: str) -> str:
+        return self.mapping[meaning]
+
+    def meaning_for(self, word: str) -> Optional[str]:
+        for m, w in self.mapping.items():
+            if w == word:
+                return m
+        return None
+
+
+def make_lexicon_space(meanings: Sequence[str], words: Sequence[str]) -> List[TinyLexicon]:
+    """
+    Generate all one-to-one lexicons mapping meanings to words.
+    """
+    meanings = list(meanings)
+    words = list(words)
+    if len(words) < len(meanings):
+        raise ValueError("Need at least as many words as meanings.")
+    out: List[TinyLexicon] = []
+    from itertools import permutations
+
+    for perm in permutations(words, len(meanings)):
+        mapping = {m: w for m, w in zip(meanings, perm)}
+        out.append(TinyLexicon(meanings, words, mapping))
+    return out
+
+
+def update_lexicon_posterior(
+    lexicons: Sequence[TinyLexicon],
+    prior: np.ndarray,
+    meaning: str,
+    utterance: str,
+    eps: float = 0.01,
+) -> np.ndarray:
+    """
+    One-step Bayes update over lexicon hypotheses given (meaning, utterance).
+
+    Likelihood:
+      - high (1-eps) if lexicon maps meaning to utterance
+      - low (eps) otherwise
+    """
+    pri = np.array(prior, dtype=float)
+    if pri.shape[0] != len(lexicons):
+        raise ValueError("Prior length must match number of lexicons.")
+
+    like = np.zeros(len(lexicons), dtype=float)
+    for i, L in enumerate(lexicons):
+        like[i] = 1.0 - eps if L.word_for(meaning) == utterance else eps
+
+    post_unnorm = pri * like
+    Z = post_unnorm.sum()
+    if Z <= 0.0:
+        # fallback to uniform
+        return np.ones_like(post_unnorm) / float(len(post_unnorm))
+    return post_unnorm / Z
+
+
+def run_bayesian_lexicon_chain(
+    num_generations: int = 5,
+    trials_per_generation: int = 20,
+    eps: float = 0.01,
+) -> List[Dict[str, object]]:
+    """
+    Run a small chain of dyads that learn a lexicon via Bayesian updating.
+
+    We reuse a subset of MANUAL_TOWER_PROGRAMS keys as meanings and use
+    abstract word labels as lexemes. Each generation:
+      - Starts with the previous generation's posterior over lexicons
+      - Simulates several Architect-Builder interactions
+      - Updates the shared posterior after each trial
+      - Records communicative success and posterior entropy
+
+    Returns a list of dicts with keys:
+      - 'generation'
+      - 'success_rate'
+      - 'posterior_entropy'
+      - 'map_lexicon' (meaning -> word mapping for MAP hypothesis)
+    """
+    # Choose a small set of meanings from the available scenes
+    meanings = ["CL", "CPi", "LC"]
+    words = ["w1", "w2", "w3"]
+
+    lexicons = make_lexicon_space(meanings, words)
+    n_lex = len(lexicons)
+
+    # Prior over lexicons: uniform
+    prior = np.ones(n_lex, dtype=float) / float(n_lex)
+
+    results: List[Dict[str, object]] = []
+    rng = np.random.default_rng(0)
+
+    for gen in range(num_generations + 1):
+        posterior = np.array(prior, dtype=float)
+        successes: List[float] = []
+
+        for _ in range(trials_per_generation):
+            # Sample a meaning uniformly
+            meaning = rng.choice(meanings)
+
+            # Architect samples a lexicon from posterior and speaks deterministically
+            idx_arch = rng.choice(np.arange(n_lex), p=posterior)
+            L_arch = lexicons[int(idx_arch)]
+            utt = L_arch.word_for(meaning)
+
+            # Builder infers meaning from utterance using the same posterior
+            # P(m | utt) ∝ sum_{L: L(m) = utt} P(L)
+            meaning_scores = np.zeros(len(meanings), dtype=float)
+            for i_m, m in enumerate(meanings):
+                mask = np.array(
+                    [1.0 if L.word_for(m) == utt else 0.0 for L in lexicons],
+                    dtype=float,
+                )
+                meaning_scores[i_m] = float((posterior * mask).sum())
+            if meaning_scores.sum() <= 0.0:
+                # fall back to uniform guess
+                meaning_probs = np.ones_like(meaning_scores) / float(len(meaning_scores))
+            else:
+                meaning_probs = meaning_scores / meaning_scores.sum()
+            idx_guess = int(np.argmax(meaning_probs))
+            guessed_meaning = meanings[idx_guess]
+
+            successes.append(1.0 if guessed_meaning == meaning else 0.0)
+
+            # Update posterior on lexicons based on observed (meaning, utt)
+            posterior = update_lexicon_posterior(
+                lexicons=lexicons,
+                prior=posterior,
+                meaning=meaning,
+                utterance=utt,
+                eps=eps,
+            )
+
+        # Record generation summary
+        success_rate = float(np.mean(successes)) if successes else 0.0
+        # Entropy of posterior over lexicons
+        nonzero_mask = posterior > 0.0
+        if np.any(nonzero_mask):
+            nonzero_probs = np.array([float(p) for p in posterior[nonzero_mask]])
+            log_probs = np.array([np.log2(p) if p > 0 else 0.0 for p in nonzero_probs])
+            posterior_entropy = float(-sum(nonzero_probs * log_probs))
+        else:
+            posterior_entropy = 0.0
+        map_idx = int(np.argmax(posterior))
+        map_lex = lexicons[map_idx].mapping
+
+        results.append(
+            {
+                "generation": gen,
+                "success_rate": success_rate,
+                "posterior_entropy": posterior_entropy,
+                "map_lexicon": dict(map_lex),
+            }
+        )
+
+        # Next generation starts from this posterior
+        prior = posterior.copy()
+
+    return results
+
+
+def run_chain_ast(
+    initial_program: Sequence[str],
+    num_generations: int,
+    dsl: Optional[Sequence[str]] = None,
+    lambda_c: float = 1.0,
+    lambda_m: float = 1.0,
+    num_candidates: int = 5,
+    fragment_discovery_freq: int = 3,
+    random_seed: Optional[int] = None,
+) -> List[List[str]]:
+    """
+    Run a transmission chain using AST-level reconstruction with fragments.
+    
+    At each generation:
+    - Discover fragments from accumulated programs (every fragment_discovery_freq steps)
+    - Generate candidate AST edits from the current program
+    - Score candidates using reconstruction_cost (complexity + mismatch)
+    - Apply fragments to compress the selected AST
+    - Convert back to tokens for compatibility
+    
+    Returns a list of token programs over generations.
+    """
+    from .selection import (
+        generate_ast_candidates,
+        reconstruction_cost,
+        complexity,
+    )
+    
+    dsl_tokens = list(dsl) if dsl is not None else list(DEFAULT_DSL)
+    rng = random.Random(random_seed)
+    
+    library = Library()
+    all_programs = []
+    chain: List[List[str]] = [list(initial_program)]
+    all_programs.append(list(initial_program))
+    current_tokens = list(initial_program)
+    
+    for gen in range(num_generations):
+        # Discover fragments more frequently to improve early compression
+        # Discover on first generation and then periodically
+        should_discover = (
+            gen == 0  # Always discover on first generation
+            or (gen > 0 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
+        )
+        
+        if should_discover and len(all_programs) >= 2:
+            library = discover_fragments(
+                programs=all_programs,
+                min_length=3,
+                max_length=5,
+                min_freq=2,
+            )
+            set_library(library)
+        
+        # Convert current to AST
+        current_ast = tokens_to_ast(current_tokens)
+        
+        # Generate candidate ASTs (pass library for fragment-based edits)
+        candidates = generate_ast_candidates(current_ast, num_candidates, rng, library=library)
+        
+        # Score each candidate
+        costs = []
+        for cand in candidates:
+            cost = reconstruction_cost(
+                candidate=cand,
+                perceived=current_ast,
+                lambda_c=lambda_c,
+                lambda_m=lambda_m
+            )
+            costs.append(cost)
+        
+        # Select best (argmin cost)
+        best_idx = min(range(len(candidates)), key=lambda i: costs[i])
+        selected_ast = candidates[best_idx]
+        
+        # Apply fragments to compress
+        if len(library) > 0:
+            selected_ast, _ = apply_fragments(selected_ast, library)
+        
+        # Convert back to tokens
+        next_tokens = ast_to_tokens(selected_ast)
+        chain.append(next_tokens)
+        all_programs.append(next_tokens)
+        current_tokens = next_tokens
+    
+    return chain
+
+
+def run_chain_ib(
+    initial_program: Sequence[str],
+    true_program: Sequence[str],
+    num_generations: int,
+    beta: float = 1.0,
+    num_candidates: int = 5,
+    fragment_discovery_freq: int = 3,
+    random_seed: Optional[int] = None,
+) -> List[List[str]]:
+    """
+    Run a transmission chain using explicit IB-style loss.
+    
+    At each generation:
+    - Discover fragments periodically
+    - Generate candidate AST edits
+    - Score with IB loss: L = C - beta * A
+      where C = description_length, A = accuracy vs true_program
+    - Select argmin loss
+    - Apply fragments and return tokens
+    
+    Returns list of token programs over generations.
+    """
+    from .selection import generate_ast_candidates
+    
+    rng = random.Random(random_seed)
+    true_ast = tokens_to_ast(true_program)
+    
+    library = Library()
+    all_programs = []
+    chain: List[List[str]] = [list(initial_program)]
+    all_programs.append(list(initial_program))
+    current_tokens = list(initial_program)
+    
+    for gen in range(num_generations):
+        # Discover fragments more frequently to improve early compression
+        # Discover on first generation and then periodically
+        should_discover = (
+            gen == 0  # Always discover on first generation
+            or (gen > 0 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
+        )
+        
+        if should_discover and len(all_programs) >= 2:
+            library = discover_fragments(
+                programs=all_programs,
+                min_length=3,
+                max_length=5,
+                min_freq=2,
+            )
+            set_library(library)
+        
+        # Convert to AST
+        current_ast = tokens_to_ast(current_tokens)
+        
+        # Generate candidates (pass library for fragment-based edits)
+        candidates = generate_ast_candidates(current_ast, num_candidates, rng, library=library)
+        
+        # Score with IB loss using dynamic normalization (based on candidate set)
+        losses = []
+        for cand in candidates:
+            loss = ib_loss(
+                cand, true_ast, 
+                beta=beta, 
+                library=library,
+                normalize_mode='dynamic',
+                candidates=candidates
+            )
+            losses.append(loss)
+        
+        # Select argmin loss
+        best_idx = min(range(len(candidates)), key=lambda i: losses[i])
+        selected_ast = candidates[best_idx]
+        
+        # Apply fragments
+        if len(library) > 0:
+            selected_ast, _ = apply_fragments(selected_ast, library)
+        
+        # Convert to tokens
+        next_tokens = ast_to_tokens(selected_ast)
+        chain.append(next_tokens)
+        all_programs.append(next_tokens)
+        current_tokens = next_tokens
+    
+    return chain
 
 

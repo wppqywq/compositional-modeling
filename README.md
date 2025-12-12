@@ -4,6 +4,12 @@ This repository is a personal working copy of the original project [`cogtoolslab
 
 For the original documentation, please see [`README_original.md`](./README_original.md) in this repository.
 
-`notebooks_new/4_transmission_chain_sim.ipynb` and `5_pid_synergy_demo.ipynb` contain exploratory extensions on transmission-chain simulations and a small PID-style synergy demo that build on the original three tutorials.
+### Extended modules (AST-based transmission chains)
 
-This readme is still under construction.
+- `notebooks_new/4_transmission_chain_sim.ipynb`: Transmission chain simulation with AST-structured programs, fragment learning, and information-bottleneck objectives.
+
+New modular components:
+- `model/dsl/`: AST representation, token↔AST parser, fragments and library
+- `model/program_induction/`: Fragment discovery via frequent subsequence mining
+- `model/eval/`: Tree edit distance, IB-style loss functions
+- `model/transmission/`: Multiple chain types (noise-only, token-selection, AST-based with IB loss)
