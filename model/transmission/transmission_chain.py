@@ -1,5 +1,6 @@
 import random
-from typing import Dict, List, Sequence, Optional
+import math
+from typing import Dict, List, Sequence, Optional, Tuple
 
 import numpy as np
 
@@ -564,8 +565,13 @@ def run_chain_ast(
         if len(library) > 0:
             selected_ast, _ = apply_fragments(selected_ast, library)
         
-        # Convert back to tokens
+        # Convert back to tokens (temporarily clear library so fragment calls are preserved as #FX tokens)
+        from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
+        old_library = parser_get_library()
+        parser_set_library(None)  # Clear library so CALL nodes become #FX tokens
         next_tokens = ast_to_tokens(selected_ast)
+        parser_set_library(old_library)  # Restore library
+        
         chain.append(next_tokens)
         all_programs.append(next_tokens)
         current_tokens = next_tokens
@@ -580,8 +586,11 @@ def run_chain_ib(
     beta: float = 1.0,
     num_candidates: int = 5,
     fragment_discovery_freq: int = 3,
+    temperature: float = 0.0,
+    noise_params: Optional[Dict[str, float]] = None,
+    use_true_target: bool = False,
     random_seed: Optional[int] = None,
-) -> List[List[str]]:
+) -> Tuple[List[List[str]], Library]:
     """
     Run a transmission chain using explicit IB-style loss.
     
@@ -593,17 +602,37 @@ def run_chain_ib(
     - Select argmin loss
     - Apply fragments and return tokens
     
-    Returns list of token programs over generations.
+    Returns (chain, library) tuple where chain is list of token programs
+    and library is the fragment library discovered during this chain.
     """
     from .selection import generate_ast_candidates
     
     rng = random.Random(random_seed)
     true_ast = tokens_to_ast(true_program)
+    dsl_tokens = list(DEFAULT_DSL)
+
+    eff_noise = dict(DEFAULT_NOISE_PARAMS)
+    if noise_params is not None:
+        eff_noise.update(noise_params)
+
+    def _apply_token_noise(tokens: Sequence[str]) -> List[str]:
+        out: List[str] = []
+        for tok in list(tokens):
+            if rng.random() < float(eff_noise.get("delete", 0.0)):
+                continue
+            new_tok = tok
+            if rng.random() < float(eff_noise.get("substitute", 0.0)) and dsl_tokens:
+                new_tok = rng.choice(dsl_tokens)
+            out.append(new_tok)
+            if rng.random() < float(eff_noise.get("insert", 0.0)) and dsl_tokens:
+                out.append(rng.choice(dsl_tokens))
+        return out
     
     library = Library()
-    all_programs = []
+    # Store expanded (primitive) token programs for fragment discovery stability.
+    expanded_history: List[List[str]] = []
     chain: List[List[str]] = [list(initial_program)]
-    all_programs.append(list(initial_program))
+    expanded_history.append(expand_program(list(initial_program)))
     current_tokens = list(initial_program)
     
     for gen in range(num_generations):
@@ -611,30 +640,33 @@ def run_chain_ib(
         # Discover on generation 1 (first generation after initial) and then periodically
         # Note: We need at least 2 programs for fragment discovery (min_freq=2)
         should_discover = (
-            gen == 1  # Discover on first generation after initial (when we have 2 programs)
-            or (gen > 1 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
+            gen == 1
+            or (gen > 1 and gen % fragment_discovery_freq == 0 and len(expanded_history) > 1)
         )
         
-        if should_discover and len(all_programs) >= 2:
+        if should_discover and len(expanded_history) >= 2:
             library = discover_fragments(
-                programs=all_programs,
+                programs=expanded_history,
                 min_length=3,
                 max_length=5,
                 min_freq=2,
             )
             set_library(library)
         
-        # Convert to AST
-        current_ast = tokens_to_ast(current_tokens)
+        # Noisy perception of the previous generation's program
+        perceived_tokens = _apply_token_noise(current_tokens)
+        perceived_ast = tokens_to_ast(perceived_tokens)
         
-        # Generate candidates (pass library for fragment-based edits)
-        candidates = generate_ast_candidates(current_ast, num_candidates, rng, library=library)
+        # Generate candidates from perceived program (pass library for fragment-based edits)
+        candidates = generate_ast_candidates(perceived_ast, num_candidates, rng, library=library)
+
+        target_ast = true_ast if use_true_target else perceived_ast
         
         # Score with IB loss using dynamic normalization (based on candidate set)
         losses = []
         for cand in candidates:
             loss = ib_loss(
-                cand, true_ast, 
+                cand, target_ast,
                 beta=beta, 
                 library=library,
                 normalize_mode='dynamic',
@@ -642,20 +674,48 @@ def run_chain_ib(
             )
             losses.append(loss)
         
-        # Select argmin loss
-        best_idx = min(range(len(candidates)), key=lambda i: losses[i])
-        selected_ast = candidates[best_idx]
+        # Select next program
+        if temperature is None or float(temperature) <= 0.0:
+            best_idx = min(range(len(candidates)), key=lambda i: losses[i])
+            selected_ast = candidates[best_idx]
+        else:
+            t = float(temperature)
+            scaled = [-(l / t) for l in losses]
+            m = max(scaled)
+            exps = [math.exp(x - m) for x in scaled]
+            s = sum(exps) if exps else 1.0
+            r = rng.random()
+            acc = 0.0
+            chosen = 0
+            for i, e in enumerate(exps):
+                acc += e / s
+                if r <= acc:
+                    chosen = i
+                    break
+            selected_ast = candidates[chosen]
         
         # Apply fragments
         if len(library) > 0:
             selected_ast, _ = apply_fragments(selected_ast, library)
         
-        # Convert to tokens
+        # Convert to tokens:
+        # - expanded_next: primitive tokens used for fragment discovery stability
+        # - next_tokens: compressed tokens with #FX to track fragment usage over generations
+        from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
+        old_library = parser_get_library()
+
+        parser_set_library(library)
+        expanded_next = ast_to_tokens(selected_ast)
+
+        parser_set_library(None)
         next_tokens = ast_to_tokens(selected_ast)
+
+        parser_set_library(old_library)
+        
         chain.append(next_tokens)
-        all_programs.append(next_tokens)
+        expanded_history.append(expanded_next)
         current_tokens = next_tokens
     
-    return chain
+    return chain, library
 
 

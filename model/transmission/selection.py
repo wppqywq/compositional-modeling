@@ -45,58 +45,71 @@ def generate_ast_candidates(
         return [ast.copy()]
     
     candidates = [ast.copy()]  # Always include identity
+    max_attempts = num_candidates * 3  # Try harder to get diverse candidates
     
     # Determine edit types based on whether library is available
     edit_types = ['delete', 'insert', 'replace']
     if library is not None and len(library.fragments) > 0:
         edit_types.extend(['replace_with_fragment', 'expand_fragment'])
     
-    for _ in range(num_candidates - 1):
+    attempts = 0
+    while len(candidates) < num_candidates and attempts < max_attempts:
+        attempts += 1
         new_ast = ast.copy()
         if len(new_ast.children) == 0:
-            candidates.append(new_ast)
             continue
         
-        # Choose random edit type
-        edit_type = rng.choice(edit_types)
+        # Apply 1-3 edits to increase diversity
+        num_edits = rng.randint(1, 3)
+        edited = False
         
-        if edit_type == 'delete' and len(new_ast.children) > 1:
-            idx = rng.randint(0, len(new_ast.children) - 1)
-            new_ast.children.pop(idx)
+        for _ in range(num_edits):
+            if len(new_ast.children) == 0:
+                break
+            
+            # Choose random edit type
+            edit_type = rng.choice(edit_types)
+            
+            if edit_type == 'delete' and len(new_ast.children) > 1:
+                idx = rng.randint(0, len(new_ast.children) - 1)
+                new_ast.children.pop(idx)
+                edited = True
+            
+            elif edit_type == 'insert':
+                idx = rng.randint(0, len(new_ast.children))
+                op, args = rng.choice(PRIMITIVE_OPS)
+                new_ast.children.insert(idx, Node(op, args.copy()))
+                edited = True
+            
+            elif edit_type == 'replace' and len(new_ast.children) > 0:
+                idx = rng.randint(0, len(new_ast.children) - 1)
+                op, args = rng.choice(PRIMITIVE_OPS)
+                new_ast.children[idx] = Node(op, args.copy())
+                edited = True
+            
+            elif edit_type == 'replace_with_fragment' and library is not None and len(new_ast.children) > 0:
+                # Try to replace a random subtree with a fragment call
+                non_call_indices = [i for i in range(len(new_ast.children)) if new_ast.children[i].op != 'CALL']
+                if non_call_indices:
+                    idx = rng.choice(non_call_indices)
+                    frag = rng.choice(list(library.fragments.values()))
+                    new_ast.children[idx] = Node('CALL', {'name': frag.name})
+                    edited = True
+            
+            elif edit_type == 'expand_fragment' and library is not None:
+                # Try to expand a random fragment call
+                call_indices = [i for i in range(len(new_ast.children)) if new_ast.children[i].op == 'CALL']
+                if call_indices:
+                    idx = rng.choice(call_indices)
+                    call_node = new_ast.children[idx]
+                    frag_name = call_node.args.get('name')
+                    frag = library.get(frag_name) if frag_name else None
+                    if frag is not None:
+                        new_ast.children[idx] = frag.body.copy()
+                        edited = True
         
-        elif edit_type == 'insert':
-            idx = rng.randint(0, len(new_ast.children))
-            op, args = rng.choice(PRIMITIVE_OPS)
-            new_ast.children.insert(idx, Node(op, args.copy()))
-        
-        elif edit_type == 'replace' and len(new_ast.children) > 0:
-            idx = rng.randint(0, len(new_ast.children) - 1)
-            op, args = rng.choice(PRIMITIVE_OPS)
-            new_ast.children[idx] = Node(op, args.copy())
-        
-        elif edit_type == 'replace_with_fragment' and library is not None and len(new_ast.children) > 0:
-            # Try to replace a random subtree with a fragment call
-            # Find a random non-CALL child
-            non_call_indices = [i for i in range(len(new_ast.children)) if new_ast.children[i].op != 'CALL']
-            if non_call_indices:
-                idx = rng.choice(non_call_indices)
-                # Choose a random fragment
-                frag = rng.choice(list(library.fragments.values()))
-                new_ast.children[idx] = Node('CALL', {'name': frag.name})
-        
-        elif edit_type == 'expand_fragment' and library is not None:
-            # Try to expand a random fragment call
-            call_indices = [i for i in range(len(new_ast.children)) if new_ast.children[i].op == 'CALL']
-            if call_indices:
-                idx = rng.choice(call_indices)
-                call_node = new_ast.children[idx]
-                frag_name = call_node.args.get('name')
-                frag = library.get(frag_name) if frag_name else None
-                if frag is not None:
-                    # Replace CALL with fragment body
-                    new_ast.children[idx] = frag.body.copy()
-        
-        candidates.append(new_ast)
+        if edited:
+            candidates.append(new_ast)
     
     return candidates
 

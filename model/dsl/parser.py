@@ -36,6 +36,7 @@ def tokens_to_ast(tokens: Sequence[str]) -> Node:
     - Each token becomes a primitive action node:
       - 'h' or 'v' -> PLACE(shape)
       - 'l_X' or 'r_X' -> MOVE(direction, distance)
+      - '#FX' -> CALL(name='FX') for fragment calls
     """
     children = []
     for tok in tokens:
@@ -49,6 +50,10 @@ def tokens_to_ast(tokens: Sequence[str]) -> Node:
         elif tok.startswith('r_'):
             dist = int(tok[2:])
             children.append(Node('MOVE', {'direction': 'right', 'distance': dist}))
+        elif tok.startswith('#F'):
+            # Fragment call token: #F1, #F2, etc.
+            frag_name = tok[1:]  # Remove '#' prefix
+            children.append(Node('CALL', {'name': frag_name}))
         else:
             # Unknown token: wrap as generic action
             children.append(Node('ACTION', {'token': tok}))
