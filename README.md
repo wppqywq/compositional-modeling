@@ -9,7 +9,7 @@ For the original documentation, please see [`README_original.md`](./README_origi
 - `notebooks_new/4_transmission_chain_sim.ipynb`: Transmission chain simulation with AST-structured programs, fragment learning, and information-bottleneck objectives.
 
 New modular components:
-- `model/dsl/`: AST representation, token↔AST parser, fragments and library
+- `model/dsl/`: AST representation, token-AST parser, fragments and library
 - `model/program_induction/`: Fragment discovery via frequent subsequence mining
 - `model/eval/`: Tree edit distance, IB-style loss functions
 - `model/transmission/`: Multiple chain types (noise-only, token-selection, AST-based with IB loss)
