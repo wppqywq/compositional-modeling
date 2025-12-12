@@ -645,8 +645,9 @@ def run_chain_ib(
         )
         
         if should_discover and len(expanded_history) >= 2:
+            expanded_history_seq: List[Sequence[str]] = list(expanded_history)
             library = discover_fragments(
-                programs=expanded_history,
+                programs=expanded_history_seq,
                 min_length=3,
                 max_length=5,
                 min_freq=2,
@@ -719,3 +720,125 @@ def run_chain_ib(
     return chain, library
 
 
+def run_chain_bayes(
+    initial_program: Sequence[str],
+    true_program: Sequence[str],
+    num_generations: int,
+    alpha: float = 10.0,
+    lambda_len: float = 0.1,
+    num_candidates: int = 10,
+    fragment_discovery_freq: int = 3,
+    temperature: float = 0.0,
+    noise_params: Optional[Dict[str, float]] = None,
+    random_seed: Optional[int] = None,
+) -> Tuple[List[List[str]], Library]:
+    """
+    Run a Bayesian listener transmission chain.
+    
+    At each generation:
+    - Apply perception noise to current program
+    - Generate candidate reconstructions
+    - Score with Bayesian posterior: log p(cand | obs) = log_prior + log_likelihood
+      where prior favors short programs and likelihood favors match to observation
+    - Select via MAP (temperature=0) or soft sampling (temperature>0)
+    - Apply fragments and emit tokens
+    - Periodically discover fragments from expanded token history
+    
+    Args:
+        initial_program: Starting program tokens
+        true_program: True target program (for evaluation only, not used in reconstruction)
+        num_generations: Number of generations to run
+        alpha: Likelihood scaling (higher = stronger fit to observation)
+        lambda_len: Prior scaling (higher = stronger preference for compression)
+        num_candidates: Number of candidate programs to generate
+        fragment_discovery_freq: Discover fragments every N generations
+        temperature: Selection temperature (0 = greedy MAP, >0 = soft sampling)
+        noise_params: Noise parameters for perception (delete, insert, substitute)
+        random_seed: Random seed
+    
+    Returns:
+        (chain, library) tuple where chain is list of token programs
+        and library is the fragment library discovered during this chain
+    """
+    from .selection import generate_ast_candidates, select_bayesian_candidate
+    
+    rng = random.Random(random_seed)
+    
+    # Initialize noise model
+    if noise_params is None:
+        noise_params = {'delete': 0.02, 'insert': 0.02, 'substitute': 0.02}
+    noise_model = TransmissionChain(
+        dsl=DEFAULT_DSL,
+        noise_params=noise_params,
+        random_seed=random_seed
+    )
+    
+    library = Library()
+    all_programs = []
+    chain: List[List[str]] = [list(initial_program)]
+    all_programs.append(list(initial_program))
+    current_tokens = list(initial_program)
+    
+    for gen in range(num_generations):
+        # Fragment discovery (periodic)
+        should_discover = (
+            gen == 1
+            or (gen > 1 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
+        )
+        
+        if should_discover and len(all_programs) >= 2:
+            # Discover fragments from expanded tokens (not from #F macros)
+            expanded_programs: List[Sequence[str]] = [expand_program(p) for p in all_programs]
+            library = discover_fragments(
+                programs=expanded_programs,
+                min_length=3,
+                max_length=5,
+                min_freq=2,
+            )
+            set_library(library)
+        
+        # Apply perception noise to current program
+        obs_tokens = noise_model.transmit_once(current_tokens)
+        # Expand any compressed tokens (e.g., 'r_4*2') before converting to AST
+        obs_tokens_expanded = expand_program(obs_tokens)
+        obs_ast = tokens_to_ast(obs_tokens_expanded)
+        
+        # Generate candidate reconstructions
+        # Include both: (1) observation and its variants, (2) current program and its variants
+        # This allows listener to either trust observation or stick with current belief
+        current_ast = tokens_to_ast(current_tokens)
+        
+        # Half candidates from observation (what was heard)
+        obs_candidates = generate_ast_candidates(obs_ast, num_candidates // 2, rng, library=library, max_edits_per_candidate=1)
+        # Half candidates from current (maintain continuity)
+        current_candidates = generate_ast_candidates(current_ast, num_candidates - len(obs_candidates), rng, library=library, max_edits_per_candidate=1)
+        
+        candidates = obs_candidates + current_candidates
+        
+        # Bayesian selection: posterior = prior + likelihood
+        selected_ast = select_bayesian_candidate(
+            candidates=candidates,
+            obs_ast=obs_ast,
+            library=library,
+            alpha=alpha,
+            lambda_len=lambda_len,
+            temperature=temperature,
+            rng=rng,
+        )
+        
+        # Apply fragments to compress
+        if len(library) > 0:
+            selected_ast, _ = apply_fragments(selected_ast, library)
+        
+        # Convert to tokens (preserve #F macros for tracking)
+        from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
+        old_library = parser_get_library()
+        parser_set_library(None)  # Clear so CALL nodes become #FX tokens
+        next_tokens = ast_to_tokens(selected_ast)
+        parser_set_library(old_library)
+        
+        chain.append(next_tokens)
+        all_programs.append(next_tokens)
+        current_tokens = next_tokens
+    
+    return chain, library

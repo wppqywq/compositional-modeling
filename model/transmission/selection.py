@@ -24,6 +24,7 @@ def generate_ast_candidates(
     num_candidates: int,
     rng: random.Random,
     library: Optional[Library] = None,
+    max_edits_per_candidate: int = 3,
 ) -> List[Node]:
     """
     Generate candidate AST variants via local edits and fragment-based transformations.
@@ -59,8 +60,8 @@ def generate_ast_candidates(
         if len(new_ast.children) == 0:
             continue
         
-        # Apply 1-3 edits to increase diversity
-        num_edits = rng.randint(1, 3)
+        # Apply 1 to max_edits_per_candidate edits
+        num_edits = rng.randint(1, max_edits_per_candidate)
         edited = False
         
         for _ in range(num_edits):
@@ -142,4 +143,114 @@ def reconstruction_cost(
     C = complexity(candidate)
     M = structural_mismatch(candidate, perceived)
     return lambda_c * C + lambda_m * M
+
+
+# Bayesian listener scoring functions
+
+def log_prior(candidate_ast: Node, library: Optional[Library] = None, lambda_len: float = 1.0) -> float:
+    """
+    Compute log prior for a candidate program.
+    
+    log p(candidate) = -lambda_len * description_length(candidate)
+    
+    This favors shorter programs (abstraction via fragments).
+    """
+    from model.eval.metrics import description_length
+    length = description_length(candidate_ast, library)
+    return -lambda_len * float(length)
+
+
+def log_likelihood(candidate_ast: Node, obs_ast: Node, library: Optional[Library] = None, alpha: float = 1.0) -> float:
+    """
+    Compute log likelihood of observing obs_ast given candidate_ast.
+    
+    log p(obs | candidate) = -alpha * normalized_tree_distance(candidate, obs)
+    
+    This measures how similar the candidate is to the observation after
+    expanding fragment calls (semantic similarity).
+    
+    Args:
+        candidate_ast: Reconstructed program candidate
+        obs_ast: Observed/noisy program
+        library: Fragment library for expanding CALL nodes
+        alpha: Scaling factor for distance penalty
+    """
+    from model.eval.metrics import normalized_tree_distance
+    from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
+    
+    # Temporarily set library for correct expansion during distance computation
+    old_lib = parser_get_library()
+    if library is not None:
+        parser_set_library(library)
+    
+    try:
+        # Distance already expands CALL nodes via expand_calls in normalized_tree_distance
+        dist = normalized_tree_distance(candidate_ast, obs_ast)
+        log_lik = -alpha * dist
+    finally:
+        parser_set_library(old_lib)
+    
+    return log_lik
+
+
+def select_bayesian_candidate(
+    candidates: List[Node],
+    obs_ast: Node,
+    library: Optional[Library] = None,
+    alpha: float = 10.0,
+    lambda_len: float = 0.1,
+    temperature: float = 0.0,
+    rng: Optional[random.Random] = None,
+) -> Node:
+    """
+    Select a candidate using Bayesian posterior (MAP or soft-max sampling).
+    
+    Posterior: log p(candidate | obs) = log_likelihood + log_prior
+    
+    Args:
+        candidates: List of candidate ASTs
+        obs_ast: Observed/noisy program AST
+        library: Fragment library
+        alpha: Likelihood scaling (higher = stronger fit to observation)
+        lambda_len: Prior scaling (higher = stronger preference for short programs)
+        temperature: Selection temperature (0 = greedy MAP, >0 = soft sampling)
+        rng: Random number generator for sampling
+    
+    Returns:
+        Selected candidate AST
+    """
+    if len(candidates) == 0:
+        raise ValueError("Cannot select from empty candidate list")
+    
+    if len(candidates) == 1:
+        return candidates[0]
+    
+    # Compute log posterior for each candidate
+    log_posts = []
+    for cand in candidates:
+        log_pri = log_prior(cand, library, lambda_len)
+        log_lik = log_likelihood(cand, obs_ast, library, alpha)
+        log_post = log_pri + log_lik
+        log_posts.append(log_post)
+    
+    # Select candidate
+    if temperature <= 0.0:
+        # Greedy MAP: argmax posterior
+        best_idx = max(range(len(candidates)), key=lambda i: log_posts[i])
+        return candidates[best_idx]
+    else:
+        # Soft sampling via softmax
+        import numpy as np
+        # Shift for numerical stability
+        max_log_post = max(log_posts)
+        shifted = [(lp - max_log_post) / temperature for lp in log_posts]
+        exp_vals = [np.exp(s) for s in shifted]
+        total = sum(exp_vals)
+        probs = [e / total for e in exp_vals]
+        
+        if rng is None:
+            rng = random.Random()
+        
+        chosen_idx = rng.choices(range(len(candidates)), weights=probs)[0]
+        return candidates[chosen_idx]
 
