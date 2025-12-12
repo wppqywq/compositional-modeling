@@ -243,11 +243,6 @@ def run_chain_with_selection(
     
     Note: This is mathematically equivalent to utility = accuracy - lambda * penalty,
     but using loss makes the concept consistent with IB loss (lower is better).
-    
-    This ensures that:
-    - Programs shorter than base_length get no penalty (or even bonus)
-    - Longer programs get increasing penalty
-    - The penalty scales relative to base_length, keeping lambda interpretable
     """
     if num_candidates < 1:
         raise ValueError("num_candidates must be at least 1.")
@@ -528,10 +523,11 @@ def run_chain_ast(
     
     for gen in range(num_generations):
         # Discover fragments more frequently to improve early compression
-        # Discover on first generation and then periodically
+        # Discover on generation 1 (first generation after initial) and then periodically
+        # Note: We need at least 2 programs for fragment discovery (min_freq=2)
         should_discover = (
-            gen == 0  # Always discover on first generation
-            or (gen > 0 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
+            gen == 1  # Discover on first generation after initial (when we have 2 programs)
+            or (gen > 1 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
         )
         
         if should_discover and len(all_programs) >= 2:
@@ -612,10 +608,11 @@ def run_chain_ib(
     
     for gen in range(num_generations):
         # Discover fragments more frequently to improve early compression
-        # Discover on first generation and then periodically
+        # Discover on generation 1 (first generation after initial) and then periodically
+        # Note: We need at least 2 programs for fragment discovery (min_freq=2)
         should_discover = (
-            gen == 0  # Always discover on first generation
-            or (gen > 0 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
+            gen == 1  # Discover on first generation after initial (when we have 2 programs)
+            or (gen > 1 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
         )
         
         if should_discover and len(all_programs) >= 2:
