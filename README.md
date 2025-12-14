@@ -6,10 +6,15 @@ For the original documentation, please see [`README_original.md`](./README_origi
 
 ### Extended modules (AST-based transmission chains)
 
-- `notebooks_new/4_transmission_chain_sim.ipynb`: Transmission chain simulation with AST-structured programs, fragment learning, and information-bottleneck objectives.
+The main notebook:
+- `notebooks_new/notebook5_2.ipynb`: Communication system evolution (based on notebook3). Meanings are fixed from empirical trials; conventions and chunk usage evolve across generations.
+
+
+For study purpose:
+- `notebooks_new/4_transmission_chain_sim.ipynb`: Transmission chain simulation with abstract-syntax-tree programs, fragment learning, and information-bottleneck objectives. base on notebook2.
 
 New modular components:
-- `model/dsl/`: AST representation, token-AST parser, fragments and library
-- `model/program_induction/`: Fragment discovery via frequent subsequence mining
-- `model/eval/`: Tree edit distance, IB-style loss functions
-- `model/transmission/`: Multiple chain types (noise-only, token-selection, AST-based with IB loss)
+- `model/transmission/transmission_chain.py`: evolution chain runner (`run_comm_chain_bayes_rsa`). Also AST chain with IB loss in notebook4.
+- `model/convention_formation/`: Notebook3 convention formation code (lexicon + priors + Bayesian update) reused by notebook5.
+- `model/dsl/`: AST representation, token-AST parser, fragments and library.
+- `model/program_induction/`: Fragment discovery via frequent subsequence mining.

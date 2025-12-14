@@ -133,3 +133,7 @@ node_modules
 temp/
 tmp/
 **/tmp
+results/*
+result/*
+output/*
+outputs/*

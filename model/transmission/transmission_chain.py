@@ -1,23 +1,17 @@
-import random
 import math
-from typing import Dict, List, Sequence, Optional, Tuple
+import os
+import random
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
-# Import DSL utilities for AST-based operations
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from model.dsl import Node, tokens_to_ast, ast_to_tokens, set_library
+from model.dsl import ast_to_tokens, tokens_to_ast, set_library
 from model.dsl.fragments import Library
-from model.program_induction import discover_fragments, apply_fragments, fragment_usage
-from model.eval import ib_loss, ib_complexity, ib_accuracy
+from model.program_induction import discover_fragments, apply_fragments
+from model.eval import ib_loss
 
 
-# Global configuration and example DSL
-
-
-# Example tower programs from the tutorial (Notebook 2)
 MANUAL_TOWER_PROGRAMS: Dict[str, str] = {
     "CL": "h l_1 v v r_1 h r_12 h l_4 h l_1 v v",
     "CPi": "h l_1 v v r_1 h r_6 v r_6 v l_5 h r_4 h",
@@ -27,31 +21,24 @@ MANUAL_TOWER_PROGRAMS: Dict[str, str] = {
     "PiL": "v r_6 v l_5 h r_4 h r_9 h l_4 h l_1 v v",
 }
 
-# Derive a simple DSL as the set of tokens used in the manual tower programs
 DEFAULT_DSL: List[str] = sorted(
     {token for program in MANUAL_TOWER_PROGRAMS.values() for token in program.split()}
 )
 
-# Default parameters for stochastic editing of programs
 DEFAULT_NOISE_PARAMS: Dict[str, float] = {
-    "delete": 0.05,      # probability of deleting a token
-    "insert": 0.05,      # probability of inserting a random token after a token
-    "substitute": 0.05,  # probability of substituting a token with another token
+    "delete": 0.05,
+    "insert": 0.05,
+    "substitute": 0.05,
 }
 
-# Default parameters for compression behavior
 DEFAULT_COMPRESSION_BIAS: Dict[str, float] = {
-    "merge_repeats": 0.6,  # probability of compressing a run of repeated tokens
-    "min_repeat": 2.0,     # minimum run length eligible for compression
+    "merge_repeats": 0.6,
+    "min_repeat": 2.0,
 }
 
-
-
-# Helper functions
 
 
 def expand_program(program: Sequence[str]) -> List[str]:
-    """Expand macro tokens of the form 'token*k' into k repetitions of 'token'."""
     expanded: List[str] = []
     for tok in program:
         if "*" in tok:
@@ -68,17 +55,10 @@ def expand_program(program: Sequence[str]) -> List[str]:
 
 
 def expanded_length(program: Sequence[str]) -> int:
-    """Return the length of a program after expanding any macro tokens."""
     return len(expand_program(program))
 
 
 def sequence_accuracy(true_program: Sequence[str], observed_program: Sequence[str]) -> float:
-    """
-    Compute a simple accuracy score between two programs.
-
-    The score is the proportion of positions in the true program that match
-    the observed program after expanding both, aligned from the start.
-    """
     true_expanded = expand_program(true_program)
     obs_expanded = expand_program(observed_program)
     if not true_expanded:
@@ -92,13 +72,6 @@ def sequence_accuracy(true_program: Sequence[str], observed_program: Sequence[st
 
 
 def visual_overlap_score(true_program: Sequence[str], observed_program: Sequence[str]) -> float:
-    """
-    A coarse \"visual\" overlap proxy based on token content overlap.
-
-    We expand both programs and compute the Jaccard overlap between the sets
-    of tokens, ignoring exact positions. This is a lightweight proxy for how
-    similar two programs are in terms of the building primitives they use.
-    """
     true_expanded = expand_program(true_program)
     obs_expanded = expand_program(observed_program)
 
@@ -113,21 +86,7 @@ def visual_overlap_score(true_program: Sequence[str], observed_program: Sequence
 
 
 
-# Transmission chain model
-
-
 class TransmissionChain:
-    """
-    A simple transmission chain model over block-building programs.
-
-    Programs are represented as sequences of DSL tokens, e.g.:
-        ["h", "l_1", "v", "v", "r_1", "h"]
-
-    The transmit_once method applies stochastic edits (noise) and optional
-    compression of repeated tokens. The run_chain method iterates this process
-    over a specified number of generations.
-    """
-
     def __init__(
         self,
         dsl: Optional[Sequence[str]] = None,
@@ -145,38 +104,28 @@ class TransmissionChain:
         self.random: random.Random = random.Random(random_seed)
 
     def transmit_once(self, program: Sequence[str]) -> List[str]:
-        """
-        Apply one noisy, potentially compressive transmission step.
-
-        Returns a new program (list of tokens), without modifying the input.
-        """
         base_tokens = expand_program(program)
         edited: List[str] = []
 
         for tok in base_tokens:
-            # Deletion noise
             if self.random.random() < self.noise_params["delete"]:
                 continue
 
             new_tok = tok
 
-            # Substitution noise
             if self.random.random() < self.noise_params["substitute"] and self.dsl:
                 new_tok = self.random.choice(self.dsl)
 
             edited.append(new_tok)
 
-            # Insertion noise
             if self.random.random() < self.noise_params["insert"] and self.dsl:
                 inserted = self.random.choice(self.dsl)
                 edited.append(inserted)
 
-        # Compression step: optionally merge runs of repeated tokens
         compressed = self._compress_repeats(edited)
         return compressed
 
     def _compress_repeats(self, tokens: Sequence[str]) -> List[str]:
-        """Compress runs of repeated tokens into 'tok*k' macros."""
         if not tokens:
             return []
 
@@ -204,11 +153,6 @@ class TransmissionChain:
         return out
 
     def run_chain(self, initial_program: Sequence[str], num_generations: int) -> List[List[str]]:
-        """
-        Run a transmission chain starting from an initial program.
-
-        Returns a list of programs, including the initial program as generation 0.
-        """
         chain: List[List[str]] = [list(initial_program)]
         current: List[str] = list(initial_program)
         for _ in range(num_generations):
@@ -225,26 +169,6 @@ def run_chain_with_selection(
     num_candidates: int = 5,
     temperature: float = 0.0,
 ) -> List[List[str]]:
-    """
-    Run a transmission chain with simple selection over noisy candidates.
-
-    At each generation, we:
-    - Generate several candidate variants from the current program using
-      the model's transmit_once (plus the identity candidate).
-    - Score each candidate with a loss that trades off sequence accuracy
-      against normalized length using relative compression ratio.
-    - Choose the next program as either the argmin-loss candidate
-      (temperature=0) or via a softmax over negative loss (temperature>0).
-    
-    The loss function (for consistency with AST-level IB loss) is:
-        loss = compression_penalty - lambda * accuracy
-    
-    where compression_penalty is normalized relative to the true program length:
-        compression_penalty = max(0, (L - base_length) / base_length)
-    
-    Note: This is mathematically equivalent to utility = accuracy - lambda * penalty,
-    but using loss makes the concept consistent with IB loss (lower is better).
-    """
     if num_candidates < 1:
         raise ValueError("num_candidates must be at least 1.")
 
@@ -280,14 +204,10 @@ def run_chain_with_selection(
             loss = compression_penalty - lambda_compression * acc
             losses.append(loss)
 
-        # Selection: argmin loss or softmax over negative loss
         if temperature <= 0.0:
             best_idx = min(range(len(candidates)), key=lambda i: losses[i])
         else:
-            # Softmax over negative loss (convert loss to probability)
-            # Lower loss -> higher probability
             neg_losses = np.array([-l for l in losses], dtype=float) / float(temperature)
-            # Numerical stability
             neg_losses -= np.max(neg_losses)
             probs = np.exp(neg_losses)
             probs /= probs.sum()
@@ -307,184 +227,6 @@ def run_chain_with_selection(
 
 
 
-# Tiny Bayesian lexicon model (inspired by notebook 3)
-
-
-
-class TinyLexicon:
-    """
-    Simple lexicon mapping meanings to words.
-
-    meanings: list of meaning identifiers (e.g., scene keys like 'CL')
-    words: list of word strings (e.g., ['w1', 'w2', 'w3'])
-    mapping: dict from meaning -> word
-    """
-
-    def __init__(self, meanings: Sequence[str], words: Sequence[str], mapping: Dict[str, str]):
-        self.meanings = list(meanings)
-        self.words = list(words)
-        self.mapping = dict(mapping)
-
-    def word_for(self, meaning: str) -> str:
-        return self.mapping[meaning]
-
-    def meaning_for(self, word: str) -> Optional[str]:
-        for m, w in self.mapping.items():
-            if w == word:
-                return m
-        return None
-
-
-def make_lexicon_space(meanings: Sequence[str], words: Sequence[str]) -> List[TinyLexicon]:
-    """
-    Generate all one-to-one lexicons mapping meanings to words.
-    """
-    meanings = list(meanings)
-    words = list(words)
-    if len(words) < len(meanings):
-        raise ValueError("Need at least as many words as meanings.")
-    out: List[TinyLexicon] = []
-    from itertools import permutations
-
-    for perm in permutations(words, len(meanings)):
-        mapping = {m: w for m, w in zip(meanings, perm)}
-        out.append(TinyLexicon(meanings, words, mapping))
-    return out
-
-
-def update_lexicon_posterior(
-    lexicons: Sequence[TinyLexicon],
-    prior: np.ndarray,
-    meaning: str,
-    utterance: str,
-    eps: float = 0.01,
-) -> np.ndarray:
-    """
-    One-step Bayes update over lexicon hypotheses given (meaning, utterance).
-
-    Likelihood:
-      - high (1-eps) if lexicon maps meaning to utterance
-      - low (eps) otherwise
-    """
-    pri = np.array(prior, dtype=float)
-    if pri.shape[0] != len(lexicons):
-        raise ValueError("Prior length must match number of lexicons.")
-
-    like = np.zeros(len(lexicons), dtype=float)
-    for i, L in enumerate(lexicons):
-        like[i] = 1.0 - eps if L.word_for(meaning) == utterance else eps
-
-    post_unnorm = pri * like
-    Z = post_unnorm.sum()
-    if Z <= 0.0:
-        # fallback to uniform
-        return np.ones_like(post_unnorm) / float(len(post_unnorm))
-    return post_unnorm / Z
-
-
-def run_bayesian_lexicon_chain(
-    num_generations: int = 5,
-    trials_per_generation: int = 20,
-    eps: float = 0.01,
-) -> List[Dict[str, object]]:
-    """
-    Run a small chain of dyads that learn a lexicon via Bayesian updating.
-
-    We reuse a subset of MANUAL_TOWER_PROGRAMS keys as meanings and use
-    abstract word labels as lexemes. Each generation:
-      - Starts with the previous generation's posterior over lexicons
-      - Simulates several Architect-Builder interactions
-      - Updates the shared posterior after each trial
-      - Records communicative success and posterior entropy
-
-    Returns a list of dicts with keys:
-      - 'generation'
-      - 'success_rate'
-      - 'posterior_entropy'
-      - 'map_lexicon' (meaning -> word mapping for MAP hypothesis)
-    """
-    # Choose a small set of meanings from the available scenes
-    meanings = ["CL", "CPi", "LC"]
-    words = ["w1", "w2", "w3"]
-
-    lexicons = make_lexicon_space(meanings, words)
-    n_lex = len(lexicons)
-
-    # Prior over lexicons: uniform
-    prior = np.ones(n_lex, dtype=float) / float(n_lex)
-
-    results: List[Dict[str, object]] = []
-    rng = np.random.default_rng(0)
-
-    for gen in range(num_generations + 1):
-        posterior = np.array(prior, dtype=float)
-        successes: List[float] = []
-
-        for _ in range(trials_per_generation):
-            # Sample a meaning uniformly
-            meaning = rng.choice(meanings)
-
-            # Architect samples a lexicon from posterior and speaks deterministically
-            idx_arch = rng.choice(np.arange(n_lex), p=posterior)
-            L_arch = lexicons[int(idx_arch)]
-            utt = L_arch.word_for(meaning)
-
-            # Builder infers meaning from utterance using the same posterior
-            # P(m | utt) ∝ sum_{L: L(m) = utt} P(L)
-            meaning_scores = np.zeros(len(meanings), dtype=float)
-            for i_m, m in enumerate(meanings):
-                mask = np.array(
-                    [1.0 if L.word_for(m) == utt else 0.0 for L in lexicons],
-                    dtype=float,
-                )
-                meaning_scores[i_m] = float((posterior * mask).sum())
-            if meaning_scores.sum() <= 0.0:
-                # fall back to uniform guess
-                meaning_probs = np.ones_like(meaning_scores) / float(len(meaning_scores))
-            else:
-                meaning_probs = meaning_scores / meaning_scores.sum()
-            idx_guess = int(np.argmax(meaning_probs))
-            guessed_meaning = meanings[idx_guess]
-
-            successes.append(1.0 if guessed_meaning == meaning else 0.0)
-
-            # Update posterior on lexicons based on observed (meaning, utt)
-            posterior = update_lexicon_posterior(
-                lexicons=lexicons,
-                prior=posterior,
-                meaning=meaning,
-                utterance=utt,
-                eps=eps,
-            )
-
-        # Record generation summary
-        success_rate = float(np.mean(successes)) if successes else 0.0
-        # Entropy of posterior over lexicons
-        nonzero_mask = posterior > 0.0
-        if np.any(nonzero_mask):
-            nonzero_probs = np.array([float(p) for p in posterior[nonzero_mask]])
-            log_probs = np.array([np.log2(p) if p > 0 else 0.0 for p in nonzero_probs])
-            posterior_entropy = float(-sum(nonzero_probs * log_probs))
-        else:
-            posterior_entropy = 0.0
-        map_idx = int(np.argmax(posterior))
-        map_lex = lexicons[map_idx].mapping
-
-        results.append(
-            {
-                "generation": gen,
-                "success_rate": success_rate,
-                "posterior_entropy": posterior_entropy,
-                "map_lexicon": dict(map_lex),
-            }
-        )
-
-        # Next generation starts from this posterior
-        prior = posterior.copy()
-
-    return results
-
-
 def run_chain_ast(
     initial_program: Sequence[str],
     num_generations: int,
@@ -495,25 +237,11 @@ def run_chain_ast(
     fragment_discovery_freq: int = 3,
     random_seed: Optional[int] = None,
 ) -> List[List[str]]:
-    """
-    Run a transmission chain using AST-level reconstruction with fragments.
-    
-    At each generation:
-    - Discover fragments from accumulated programs (every fragment_discovery_freq steps)
-    - Generate candidate AST edits from the current program
-    - Score candidates using reconstruction_cost (complexity + mismatch)
-    - Apply fragments to compress the selected AST
-    - Convert back to tokens for compatibility
-    
-    Returns a list of token programs over generations.
-    """
     from .selection import (
         generate_ast_candidates,
         reconstruction_cost,
-        complexity,
     )
-    
-    dsl_tokens = list(dsl) if dsl is not None else list(DEFAULT_DSL)
+
     rng = random.Random(random_seed)
     
     library = Library()
@@ -523,11 +251,8 @@ def run_chain_ast(
     current_tokens = list(initial_program)
     
     for gen in range(num_generations):
-        # Discover fragments more frequently to improve early compression
-        # Discover on generation 1 (first generation after initial) and then periodically
-        # Note: We need at least 2 programs for fragment discovery (min_freq=2)
         should_discover = (
-            gen == 1  # Discover on first generation after initial (when we have 2 programs)
+            gen == 1
             or (gen > 1 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
         )
         
@@ -540,13 +265,10 @@ def run_chain_ast(
             )
             set_library(library)
         
-        # Convert current to AST
         current_ast = tokens_to_ast(current_tokens)
         
-        # Generate candidate ASTs (pass library for fragment-based edits)
         candidates = generate_ast_candidates(current_ast, num_candidates, rng, library=library)
         
-        # Score each candidate
         costs = []
         for cand in candidates:
             cost = reconstruction_cost(
@@ -557,20 +279,17 @@ def run_chain_ast(
             )
             costs.append(cost)
         
-        # Select best (argmin cost)
         best_idx = min(range(len(candidates)), key=lambda i: costs[i])
         selected_ast = candidates[best_idx]
         
-        # Apply fragments to compress
         if len(library) > 0:
             selected_ast, _ = apply_fragments(selected_ast, library)
         
-        # Convert back to tokens (temporarily clear library so fragment calls are preserved as #FX tokens)
         from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
         old_library = parser_get_library()
-        parser_set_library(None)  # Clear library so CALL nodes become #FX tokens
+        parser_set_library(None)
         next_tokens = ast_to_tokens(selected_ast)
-        parser_set_library(old_library)  # Restore library
+        parser_set_library(old_library)
         
         chain.append(next_tokens)
         all_programs.append(next_tokens)
@@ -591,20 +310,6 @@ def run_chain_ib(
     use_true_target: bool = False,
     random_seed: Optional[int] = None,
 ) -> Tuple[List[List[str]], Library]:
-    """
-    Run a transmission chain using explicit IB-style loss.
-    
-    At each generation:
-    - Discover fragments periodically
-    - Generate candidate AST edits
-    - Score with IB loss: L = C - beta * A
-      where C = description_length, A = accuracy vs true_program
-    - Select argmin loss
-    - Apply fragments and return tokens
-    
-    Returns (chain, library) tuple where chain is list of token programs
-    and library is the fragment library discovered during this chain.
-    """
     from .selection import generate_ast_candidates
     
     rng = random.Random(random_seed)
@@ -629,16 +334,12 @@ def run_chain_ib(
         return out
     
     library = Library()
-    # Store expanded (primitive) token programs for fragment discovery stability.
     expanded_history: List[List[str]] = []
     chain: List[List[str]] = [list(initial_program)]
     expanded_history.append(expand_program(list(initial_program)))
     current_tokens = list(initial_program)
     
     for gen in range(num_generations):
-        # Discover fragments more frequently to improve early compression
-        # Discover on generation 1 (first generation after initial) and then periodically
-        # Note: We need at least 2 programs for fragment discovery (min_freq=2)
         should_discover = (
             gen == 1
             or (gen > 1 and gen % fragment_discovery_freq == 0 and len(expanded_history) > 1)
@@ -654,16 +355,13 @@ def run_chain_ib(
             )
             set_library(library)
         
-        # Noisy perception of the previous generation's program
         perceived_tokens = _apply_token_noise(current_tokens)
         perceived_ast = tokens_to_ast(perceived_tokens)
         
-        # Generate candidates from perceived program (pass library for fragment-based edits)
         candidates = generate_ast_candidates(perceived_ast, num_candidates, rng, library=library)
 
         target_ast = true_ast if use_true_target else perceived_ast
         
-        # Score with IB loss using dynamic normalization (based on candidate set)
         losses = []
         for cand in candidates:
             loss = ib_loss(
@@ -675,7 +373,6 @@ def run_chain_ib(
             )
             losses.append(loss)
         
-        # Select next program
         if temperature is None or float(temperature) <= 0.0:
             best_idx = min(range(len(candidates)), key=lambda i: losses[i])
             selected_ast = candidates[best_idx]
@@ -695,13 +392,9 @@ def run_chain_ib(
                     break
             selected_ast = candidates[chosen]
         
-        # Apply fragments
         if len(library) > 0:
             selected_ast, _ = apply_fragments(selected_ast, library)
         
-        # Convert to tokens:
-        # - expanded_next: primitive tokens used for fragment discovery stability
-        # - next_tokens: compressed tokens with #FX to track fragment usage over generations
         from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
         old_library = parser_get_library()
 
@@ -732,39 +425,10 @@ def run_chain_bayes(
     noise_params: Optional[Dict[str, float]] = None,
     random_seed: Optional[int] = None,
 ) -> Tuple[List[List[str]], Library]:
-    """
-    Run a Bayesian listener transmission chain.
-    
-    At each generation:
-    - Apply perception noise to current program
-    - Generate candidate reconstructions
-    - Score with Bayesian posterior: log p(cand | obs) = log_prior + log_likelihood
-      where prior favors short programs and likelihood favors match to observation
-    - Select via MAP (temperature=0) or soft sampling (temperature>0)
-    - Apply fragments and emit tokens
-    - Periodically discover fragments from expanded token history
-    
-    Args:
-        initial_program: Starting program tokens
-        true_program: True target program (for evaluation only, not used in reconstruction)
-        num_generations: Number of generations to run
-        alpha: Likelihood scaling (higher = stronger fit to observation)
-        lambda_len: Prior scaling (higher = stronger preference for compression)
-        num_candidates: Number of candidate programs to generate
-        fragment_discovery_freq: Discover fragments every N generations
-        temperature: Selection temperature (0 = greedy MAP, >0 = soft sampling)
-        noise_params: Noise parameters for perception (delete, insert, substitute)
-        random_seed: Random seed
-    
-    Returns:
-        (chain, library) tuple where chain is list of token programs
-        and library is the fragment library discovered during this chain
-    """
     from .selection import generate_ast_candidates, select_bayesian_candidate
     
     rng = random.Random(random_seed)
     
-    # Initialize noise model
     if noise_params is None:
         noise_params = {'delete': 0.02, 'insert': 0.02, 'substitute': 0.02}
     noise_model = TransmissionChain(
@@ -780,14 +444,12 @@ def run_chain_bayes(
     current_tokens = list(initial_program)
     
     for gen in range(num_generations):
-        # Fragment discovery (periodic)
         should_discover = (
             gen == 1
             or (gen > 1 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
         )
         
         if should_discover and len(all_programs) >= 2:
-            # Discover fragments from expanded tokens (not from #F macros)
             expanded_programs: List[Sequence[str]] = [expand_program(p) for p in all_programs]
             library = discover_fragments(
                 programs=expanded_programs,
@@ -797,25 +459,17 @@ def run_chain_bayes(
             )
             set_library(library)
         
-        # Apply perception noise to current program
         obs_tokens = noise_model.transmit_once(current_tokens)
-        # Expand any compressed tokens (e.g., 'r_4*2') before converting to AST
         obs_tokens_expanded = expand_program(obs_tokens)
         obs_ast = tokens_to_ast(obs_tokens_expanded)
         
-        # Generate candidate reconstructions
-        # Include both: (1) observation and its variants, (2) current program and its variants
-        # This allows listener to either trust observation or stick with current belief
         current_ast = tokens_to_ast(current_tokens)
         
-        # Half candidates from observation (what was heard)
         obs_candidates = generate_ast_candidates(obs_ast, num_candidates // 2, rng, library=library, max_edits_per_candidate=1)
-        # Half candidates from current (maintain continuity)
         current_candidates = generate_ast_candidates(current_ast, num_candidates - len(obs_candidates), rng, library=library, max_edits_per_candidate=1)
         
         candidates = obs_candidates + current_candidates
         
-        # Bayesian selection: posterior = prior + likelihood
         selected_ast = select_bayesian_candidate(
             candidates=candidates,
             obs_ast=obs_ast,
@@ -826,14 +480,12 @@ def run_chain_bayes(
             rng=rng,
         )
         
-        # Apply fragments to compress
         if len(library) > 0:
             selected_ast, _ = apply_fragments(selected_ast, library)
         
-        # Convert to tokens (preserve #F macros for tracking)
         from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
         old_library = parser_get_library()
-        parser_set_library(None)  # Clear so CALL nodes become #FX tokens
+        parser_set_library(None)
         next_tokens = ast_to_tokens(selected_ast)
         parser_set_library(old_library)
         
@@ -842,3 +494,571 @@ def run_chain_bayes(
         current_tokens = next_tokens
     
     return chain, library
+
+
+def _softmax_np(x: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+    t = float(temperature) if temperature is not None else 1.0
+    t = max(t, 1e-9)
+    z = x / t
+    z = z - np.max(z)
+    e = np.exp(z)
+    s = float(np.sum(e))
+    return e / s if s > 0 else np.ones_like(e) / float(len(e))
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=32)
+def _load_trials_cached(path: str) -> Any:
+    import json
+    import pandas as pd
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    return pd.DataFrame(raw)
+
+
+def load_empirical_trials(
+    ppt_id: int,
+    base_dir: str,
+    source_subdir: str = "programs_for_you",
+) -> Any:
+    path = os.path.join(base_dir, source_subdir, f"programs_ppt_{ppt_id}.json")
+    return _load_trials_cached(path).copy()
+
+
+def _expected_inf(
+    beliefs: Any,
+    utterance: str,
+    intention: str,
+    actions: Sequence[str],
+    epsilon: float,
+) -> float:
+    total = 0.0
+    for lex in beliefs.support():
+        pL = float(beliefs.score(lex))
+        if pL <= 0.0:
+            continue
+        intended = lex.language_to_dsl(utterance)
+        p = 1.0 if intended == intention else float(epsilon)
+        total += pL * float(np.log(p))
+    return float(total)
+
+
+def _choose_utterance(
+    beliefs: Any,
+    intention: str,
+    utterances: Sequence[str],
+    actions: Sequence[str],
+    speaker_alpha: float,
+    epsilon: float,
+    rng: np.random.Generator,
+) -> str:
+    utils = np.array(
+        [
+            _expected_inf(beliefs, u, intention, actions=actions, epsilon=epsilon)
+            for u in utterances
+        ],
+        dtype=float,
+    )
+    probs = _softmax_np(speaker_alpha * utils, temperature=1.0)
+    idx = int(rng.choice(len(utterances), p=probs))
+    return str(list(utterances)[idx])
+
+
+def _program_utility(
+    beliefs: Any,
+    program_steps: Sequence[str],
+    utterances: Sequence[str],
+    actions: Sequence[str],
+    speaker_alpha: float,
+    speaker_beta_cost: float,
+    epsilon: float,
+) -> float:
+    if len(program_steps) == 0:
+        return -1e9
+
+    step_vals: List[float] = []
+    for step in program_steps:
+        utt_utils = np.array(
+            [
+                _expected_inf(beliefs, u, step, actions=actions, epsilon=epsilon)
+                for u in utterances
+            ],
+            dtype=float,
+        )
+        utt_probs = _softmax_np(speaker_alpha * utt_utils, temperature=1.0)
+        step_vals.append(float(np.sum(utt_utils * utt_probs)))
+
+    mean_inf = float(np.mean(step_vals))
+    beta = float(speaker_beta_cost)
+    return (1.0 - beta) * mean_inf - beta * float(len(program_steps))
+
+
+def _choose_program_representation(
+    beliefs: Any,
+    programs_with_length: Dict[str, int],
+    utterances: Sequence[str],
+    actions: Sequence[str],
+    speaker_alpha_prog: float,
+    speaker_alpha_utt: float,
+    speaker_beta_cost: float,
+    epsilon: float,
+    rng: np.random.Generator,
+) -> str:
+    programs = list(programs_with_length.keys())
+    utils = np.array(
+        [
+            _program_utility(
+                beliefs,
+                program_steps=p.split(" "),
+                utterances=utterances,
+                actions=actions,
+                speaker_alpha=speaker_alpha_utt,
+                speaker_beta_cost=speaker_beta_cost,
+                epsilon=epsilon,
+            )
+            for p in programs
+        ],
+        dtype=float,
+    )
+    probs = _softmax_np(speaker_alpha_prog * utils, temperature=1.0)
+    idx = int(rng.choice(len(programs), p=probs))
+    return str(programs[idx])
+
+
+def _choose_program_fixed(programs_with_length: Dict[str, int], mode: str = "max") -> str:
+    programs = list(programs_with_length.keys())
+    if len(programs) == 0:
+        return ""
+    if mode == "min":
+        return min(programs, key=lambda p: int(programs_with_length.get(p, len(p.split(" ")))))
+    return max(programs, key=lambda p: int(programs_with_length.get(p, len(p.split(" ")))))
+
+
+def _extract_chunks(steps: Sequence[str]) -> Set[str]:
+    return {s for s in steps if isinstance(s, str) and s.startswith("chunk")}
+
+
+@dataclass
+class ChunkRegistry:
+    all_chunks: Set[str]
+    min_attempts: int = 5
+    min_success_rate: float = 0.35
+    p_innovate: float = 0.10
+    pre_promote_chunk_correct: float = 0.40
+    max_promote_per_gen: int = 1
+    active_chunks: Set[str] = field(default_factory=set)
+    candidate_attempts: Dict[str, int] = field(default_factory=dict)
+    candidate_successes: Dict[str, int] = field(default_factory=dict)
+
+    def choose_candidate(self, rng: np.random.Generator) -> Optional[str]:
+        if float(self.p_innovate) <= 0.0:
+            return None
+        if float(rng.random()) >= float(self.p_innovate):
+            return None
+        pool = sorted(list(self.all_chunks - set(self.active_chunks)))
+        if not pool:
+            return None
+        idx = int(rng.integers(low=0, high=len(pool)))
+        return str(pool[idx])
+
+    def allowed_chunks_for_episode(self, candidate: Optional[str]) -> Set[str]:
+        allowed = set(self.active_chunks)
+        if candidate is not None:
+            allowed.add(candidate)
+        return allowed
+
+    def update_candidate(self, chunk: str, attempts: int, successes: int) -> None:
+        self.candidate_attempts[chunk] = int(self.candidate_attempts.get(chunk, 0)) + int(attempts)
+        self.candidate_successes[chunk] = int(self.candidate_successes.get(chunk, 0)) + int(successes)
+
+    def max_candidate_attempts(self) -> int:
+        return int(max(self.candidate_attempts.values(), default=0))
+
+    def max_candidate_success_rate(self) -> float:
+        best = 0.0
+        for c, a in self.candidate_attempts.items():
+            if c in self.active_chunks:
+                continue
+            aa = int(a)
+            if aa <= 0:
+                continue
+            ss = int(self.candidate_successes.get(c, 0))
+            best = max(best, float(ss) / float(aa))
+        return float(best)
+
+    def promote(self) -> List[str]:
+        eligible = []
+        for c, a in list(self.candidate_attempts.items()):
+            if c in self.active_chunks:
+                continue
+            if int(a) < int(self.min_attempts):
+                continue
+            s = int(self.candidate_successes.get(c, 0))
+            rate = float(s) / float(max(1, int(a)))
+            if rate >= float(self.min_success_rate):
+                eligible.append((c, rate, int(a)))
+        eligible.sort(key=lambda x: (-x[1], -x[2]))
+        promoted: List[str] = []
+        for c, _, _ in eligible[: int(self.max_promote_per_gen)]:
+            self.active_chunks.add(c)
+            promoted.append(c)
+        return promoted
+
+
+def _literal_builder_act(
+    beliefs: Any,
+    utterance: str,
+    actions: Sequence[str],
+    epsilon: float,
+    rng: np.random.Generator,
+) -> str:
+    scores = []
+    for a in actions:
+        p = 0.0
+        for lex in beliefs.support():
+            pL = float(beliefs.score(lex))
+            intended = lex.language_to_dsl(utterance)
+            p += pL * (1.0 if intended == a else float(epsilon))
+        scores.append(p)
+    probs = np.array(scores, dtype=float)
+    s = float(np.sum(probs))
+    if s <= 0.0:
+        probs = np.ones_like(probs) / float(len(probs))
+    else:
+        probs = probs / s
+    idx = int(rng.choice(len(actions), p=probs))
+    return str(list(actions)[idx])
+
+
+def _update_posterior(
+    role: str,
+    prior: Any,
+    observations_df: Any,
+    actions: Sequence[str],
+    utterances: Sequence[str],
+    epsilon: float,
+) -> Any:
+    import pandas as pd
+    from model.convention_formation.distribution import EmptyDistribution
+
+    if observations_df is None or len(observations_df) == 0:
+        return prior.copy()
+
+    posterior = EmptyDistribution()
+    posterior.to_logspace()
+
+    for lex in prior.support():
+        p0 = float(prior.score(lex))
+        prior_term = float(np.log(max(p0, 1e-12)))
+        ll = 0.0
+
+        for _, row in observations_df.iterrows():
+            utt = str(row["utterance"])
+            intent = str(row["intention"])
+            resp = str(row["response"])
+
+            if role == "architect":
+                intended = lex.language_to_dsl(utt)
+                p = 1.0 if intended == resp else float(epsilon)
+                ll += float(np.log(p))
+            else:
+                expected_utt = lex.dsl_to_language(intent)
+                p = 1.0 if expected_utt == utt else float(epsilon)
+                ll += float(np.log(p))
+
+        posterior.update({lex: prior_term + ll})
+
+    posterior.renormalize()
+    posterior.from_logspace()
+    return posterior
+
+
+def simulate_generation(
+    trials: Any,
+    arch_prior: Any,
+    build_prior: Any,
+    speaker_mode: str,
+    all_utterances: Sequence[str],
+    registry: Optional[ChunkRegistry],
+    speaker_alpha_prog: float,
+    speaker_alpha_utt: float,
+    speaker_beta_cost: float,
+    epsilon: float,
+    rng: np.random.Generator,
+) -> Tuple[Any, Dict[str, float], Dict[str, Any]]:
+    import pandas as pd
+
+    if speaker_mode not in {"random_utt", "literal_step", "rsa_step", "rsa_program"}:
+        raise ValueError(f"Unknown speaker_mode: {speaker_mode}")
+
+    obs_steps: List[Dict[str, Any]] = []
+    cand_events: List[Dict[str, Any]] = []
+    for _, trial in trials.iterrows():
+        actions = list(trial["dsl"])
+        programs_with_length = dict(trial["programs_with_length"])
+
+        allowed_candidate_chunk: Optional[str] = None
+        allowed_chunks: Optional[Set[str]] = None
+        if speaker_mode == "rsa_program" and registry is not None:
+            episode_chunks: Set[str] = set()
+            for p in programs_with_length.keys():
+                steps_p = str(p).split(" ") if p else []
+                episode_chunks |= _extract_chunks(steps_p)
+
+            allowed_candidate_chunk = None
+            if float(registry.p_innovate) > 0.0 and float(rng.random()) < float(registry.p_innovate):
+                pool = sorted(list((registry.all_chunks - set(registry.active_chunks)) & set(episode_chunks)))
+                if pool:
+                    allowed_candidate_chunk = str(pool[int(rng.integers(low=0, high=len(pool)))])
+
+            allowed_chunks = registry.allowed_chunks_for_episode(allowed_candidate_chunk)
+            filtered: Dict[str, int] = {}
+            for p, L in programs_with_length.items():
+                steps_p = str(p).split(" ") if p else []
+                chunks_p = _extract_chunks(steps_p)
+                if chunks_p.issubset(set(allowed_chunks)):
+                    filtered[str(p)] = int(L)
+            if filtered:
+                programs_with_length = filtered
+
+        if speaker_mode == "rsa_program":
+            chosen_program = _choose_program_representation(
+                beliefs=arch_prior,
+                programs_with_length=programs_with_length,
+                utterances=all_utterances,
+                actions=actions,
+                speaker_alpha_prog=speaker_alpha_prog,
+                speaker_alpha_utt=speaker_alpha_utt,
+                speaker_beta_cost=speaker_beta_cost,
+                epsilon=epsilon,
+                rng=rng,
+            )
+        else:
+            chosen_program = _choose_program_fixed(programs_with_length, mode="max")
+
+        steps = str(chosen_program).split(" ") if chosen_program else []
+        cand_attempts = 0
+        cand_successes = 0
+        for step in steps:
+            if speaker_mode == "random_utt":
+                utt = str(rng.choice(list(all_utterances)))
+            elif speaker_mode == "literal_step":
+                utt_dist = arch_prior.marginalize(lambda L: L.dsl_to_language(step))
+                utt = str(utt_dist.sample())
+            else:
+                utt = _choose_utterance(
+                    beliefs=arch_prior,
+                    intention=step,
+                    utterances=all_utterances,
+                    actions=actions,
+                    speaker_alpha=speaker_alpha_utt,
+                    epsilon=epsilon,
+                    rng=rng,
+                )
+
+            resp = _literal_builder_act(
+                beliefs=build_prior,
+                utterance=utt,
+                actions=actions,
+                epsilon=epsilon,
+                rng=rng,
+            )
+
+            if registry is not None and step.startswith("chunk") and step not in registry.active_chunks:
+                p_ok = float(registry.pre_promote_chunk_correct)
+                ok = bool(float(rng.random()) < p_ok)
+                if ok:
+                    resp = step
+                else:
+                    pool = [a for a in actions if a != step]
+                    if pool:
+                        resp = str(pool[int(rng.integers(low=0, high=len(pool)))])
+                if allowed_candidate_chunk is not None and step == allowed_candidate_chunk:
+                    cand_attempts += 1
+                    cand_successes += 1 if ok else 0
+
+            acc = 1.0 if resp == step else 0.0
+            obs_steps.append(
+                {
+                    "trial": int(trial["trial_num"]),
+                    "utterance": utt,
+                    "response": resp,
+                    "intention": step,
+                    "target_program": chosen_program,
+                    "acc": acc,
+                }
+            )
+
+        if allowed_candidate_chunk is not None:
+            cand_events.append(
+                {
+                    "candidate": allowed_candidate_chunk,
+                    "attempts": int(cand_attempts),
+                    "successes": int(cand_successes),
+                }
+            )
+
+    gen_df = pd.DataFrame(obs_steps)
+    acc_comm = float(gen_df["acc"].mean()) if len(gen_df) > 0 else 0.0
+    if len(gen_df) > 0:
+        msg_len = float(
+            gen_df.groupby("trial")["target_program"]
+            .apply(lambda s: len(str(s.iloc[0]).split(" ")))
+            .mean()
+        )
+        frag_rate = float(gen_df["intention"].astype(str).str.startswith("chunk").mean())
+    else:
+        msg_len = 0.0
+        frag_rate = 0.0
+
+    extra = {"cand_events": cand_events}
+    return gen_df, {"acc_comm": acc_comm, "msg_len": msg_len, "frag_rate": frag_rate}, extra
+
+def run_comm_chain_bayes_rsa(
+    ppt_id: int,
+    data_model_dir: str,
+    num_generations: int = 20,
+    lexemes: Optional[Sequence[str]] = None,
+    speaker_mode: str = "rsa_program",
+    min_attempts: int = 5,
+    min_success_rate: float = 0.35,
+    p_innovate: float = 0.10,
+    pre_promote_chunk_correct: float = 0.40,
+    max_promote_per_gen: int = 1,
+    speaker_alpha_prog: float = 2.0,
+    speaker_alpha_utt: float = 2.0,
+    speaker_beta_cost: float = 0.3,
+    epsilon: float = 0.01,
+    random_seed: int = 0,
+    source_subdir: str = "programs_for_you",
+) -> Any:
+    import pandas as pd
+    from model.convention_formation.distribution import LexiconPrior, Distribution
+    from model.convention_formation.lexicon import BlockLexicon
+
+    if lexemes is None:
+        lexemes = ["blah", "blab", "bloop", "bleep", "floop"]
+
+    trials = load_empirical_trials(
+        ppt_id=ppt_id,
+        base_dir=data_model_dir,
+        source_subdir=source_subdir,
+    ).copy()
+
+    full_dsl = sorted(set().union(*[set(x) for x in trials["dsl"].tolist()]))
+
+    utt_lex = BlockLexicon(full_dsl, list(lexemes))
+    all_utterances = sorted(list(utt_lex.utterances))
+
+    prior0 = LexiconPrior(full_dsl, list(lexemes))
+    arch_prior: Distribution = prior0
+    build_prior: Distribution = prior0
+
+    all_chunks: Set[str] = set()
+    for _, tr in trials.iterrows():
+        for a in list(tr["dsl"]):
+            if isinstance(a, str) and a.startswith("chunk"):
+                all_chunks.add(a)
+        for p in dict(tr["programs_with_length"]).keys():
+            steps_p = str(p).split(" ") if p else []
+            all_chunks |= _extract_chunks(steps_p)
+
+    registry = ChunkRegistry(
+        all_chunks=set(all_chunks),
+        min_attempts=int(min_attempts),
+        min_success_rate=float(min_success_rate),
+        p_innovate=float(p_innovate),
+        pre_promote_chunk_correct=float(pre_promote_chunk_correct),
+        max_promote_per_gen=int(max_promote_per_gen),
+    )
+
+    rng = np.random.default_rng(int(random_seed))
+    summaries: List[Dict[str, Any]] = []
+
+    for gen in range(int(num_generations)):
+        gen_df, summary, extra = simulate_generation(
+            trials=trials,
+            arch_prior=arch_prior,
+            build_prior=build_prior,
+            speaker_mode=speaker_mode,
+            all_utterances=all_utterances,
+            registry=registry,
+            speaker_alpha_prog=speaker_alpha_prog,
+            speaker_alpha_utt=speaker_alpha_utt,
+            speaker_beta_cost=speaker_beta_cost,
+            epsilon=epsilon,
+            rng=rng,
+        )
+
+        for ev in list(extra.get("cand_events", [])):
+            c = str(ev.get("candidate", ""))
+            attempts = int(ev.get("attempts", 0))
+            successes = int(ev.get("successes", 0))
+            if c and attempts > 0:
+                registry.update_candidate(c, attempts=attempts, successes=successes)
+        registry.promote()
+
+        summaries.append(
+            {
+                "generation": float(gen),
+                "acc_comm": float(summary["acc_comm"]),
+                "msg_len": float(summary["msg_len"]),
+                "frag_rate": float(summary["frag_rate"]),
+                "ppt_id": float(ppt_id),
+                "speaker_mode": str(speaker_mode),
+                "num_active_chunks": float(len(registry.active_chunks)),
+                "max_candidate_attempts": float(registry.max_candidate_attempts()),
+                "max_candidate_success_rate": float(registry.max_candidate_success_rate()),
+            }
+        )
+
+        arch_prior = _update_posterior(
+            role="architect",
+            prior=arch_prior,
+            observations_df=gen_df,
+            actions=full_dsl,
+            utterances=all_utterances,
+            epsilon=epsilon,
+        )
+        build_prior = _update_posterior(
+            role="builder",
+            prior=build_prior,
+            observations_df=gen_df,
+            actions=full_dsl,
+            utterances=all_utterances,
+            epsilon=epsilon,
+        )
+
+    return pd.DataFrame(summaries)
+
+
+def _run_comm_worker(args: Dict[str, Any]) -> Any:
+    """Picklable worker for parallel runs."""
+    import pandas as pd
+    df = run_comm_chain_bayes_rsa(
+        ppt_id=args["ppt_id"],
+        data_model_dir=args["data_model_dir"],
+        num_generations=args["num_generations"],
+        lexemes=args.get("lexemes"),
+        speaker_mode=args["speaker_mode"],
+        min_attempts=args.get("min_attempts", 10),
+        min_success_rate=args.get("min_success_rate", 0.75),
+        p_innovate=args.get("p_innovate", 0.08),
+        pre_promote_chunk_correct=args.get("pre_promote_chunk_correct", 0.35),
+        max_promote_per_gen=args.get("max_promote_per_gen", 1),
+        speaker_alpha_prog=args.get("speaker_alpha_prog", 2.0),
+        speaker_alpha_utt=args.get("speaker_alpha_utt", 2.0),
+        speaker_beta_cost=args.get("speaker_beta_cost", 0.3),
+        epsilon=args.get("epsilon", 0.01),
+        random_seed=args.get("random_seed", 0),
+        source_subdir=args.get("source_subdir", "programs_for_you"),
+    )
+    df = df.copy()
+    if "model_label" in args:
+        df["model"] = args["model_label"]
+    else:
+        df["model"] = args["speaker_mode"]
+    if "variant" in args:
+        df["variant"] = args["variant"]
+    return df

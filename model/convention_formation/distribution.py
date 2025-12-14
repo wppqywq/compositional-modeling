@@ -1,6 +1,6 @@
 import json
 import itertools
-import lexicon
+from . import lexicon
 
 import numpy as np
 import pandas as pd 
