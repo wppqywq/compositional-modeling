@@ -506,24 +506,19 @@ def _softmax_np(x: np.ndarray, temperature: float = 1.0) -> np.ndarray:
     return e / s if s > 0 else np.ones_like(e) / float(len(e))
 
 
-from functools import lru_cache
-
-@lru_cache(maxsize=32)
-def _load_trials_cached(path: str) -> Any:
-    import json
-    import pandas as pd
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    return pd.DataFrame(raw)
-
-
 def load_empirical_trials(
     ppt_id: int,
     base_dir: str,
     source_subdir: str = "programs_for_you",
 ) -> Any:
+    import json
+    import pandas as pd
+
     path = os.path.join(base_dir, source_subdir, f"programs_ppt_{ppt_id}.json")
-    return _load_trials_cached(path).copy()
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    df = pd.DataFrame(raw)
+    return df
 
 
 def _expected_inf(
@@ -642,11 +637,10 @@ def _extract_chunks(steps: Sequence[str]) -> Set[str]:
 @dataclass
 class ChunkRegistry:
     all_chunks: Set[str]
-    min_attempts: int = 5
-    min_success_rate: float = 0.35
+    min_attempts: int = 8
+    min_success_rate: float = 0.75
     p_innovate: float = 0.10
     pre_promote_chunk_correct: float = 0.40
-    max_promote_per_gen: int = 1
     active_chunks: Set[str] = field(default_factory=set)
     candidate_attempts: Dict[str, int] = field(default_factory=dict)
     candidate_successes: Dict[str, int] = field(default_factory=dict)
@@ -668,27 +662,13 @@ class ChunkRegistry:
             allowed.add(candidate)
         return allowed
 
-    def update_candidate(self, chunk: str, attempts: int, successes: int) -> None:
-        self.candidate_attempts[chunk] = int(self.candidate_attempts.get(chunk, 0)) + int(attempts)
-        self.candidate_successes[chunk] = int(self.candidate_successes.get(chunk, 0)) + int(successes)
-
-    def max_candidate_attempts(self) -> int:
-        return int(max(self.candidate_attempts.values(), default=0))
-
-    def max_candidate_success_rate(self) -> float:
-        best = 0.0
-        for c, a in self.candidate_attempts.items():
-            if c in self.active_chunks:
-                continue
-            aa = int(a)
-            if aa <= 0:
-                continue
-            ss = int(self.candidate_successes.get(c, 0))
-            best = max(best, float(ss) / float(aa))
-        return float(best)
+    def update_candidate(self, chunk: str, success: bool) -> None:
+        self.candidate_attempts[chunk] = int(self.candidate_attempts.get(chunk, 0)) + 1
+        if success:
+            self.candidate_successes[chunk] = int(self.candidate_successes.get(chunk, 0)) + 1
 
     def promote(self) -> List[str]:
-        eligible = []
+        promoted: List[str] = []
         for c, a in list(self.candidate_attempts.items()):
             if c in self.active_chunks:
                 continue
@@ -697,12 +677,8 @@ class ChunkRegistry:
             s = int(self.candidate_successes.get(c, 0))
             rate = float(s) / float(max(1, int(a)))
             if rate >= float(self.min_success_rate):
-                eligible.append((c, rate, int(a)))
-        eligible.sort(key=lambda x: (-x[1], -x[2]))
-        promoted: List[str] = []
-        for c, _, _ in eligible[: int(self.max_promote_per_gen)]:
-            self.active_chunks.add(c)
-            promoted.append(c)
+                self.active_chunks.add(c)
+                promoted.append(c)
         return promoted
 
 
@@ -838,8 +814,8 @@ def simulate_generation(
             chosen_program = _choose_program_fixed(programs_with_length, mode="max")
 
         steps = str(chosen_program).split(" ") if chosen_program else []
-        cand_attempts = 0
-        cand_successes = 0
+        cand_n = 0
+        cand_ok = 0
         for step in steps:
             if speaker_mode == "random_utt":
                 utt = str(rng.choice(list(all_utterances)))
@@ -875,8 +851,8 @@ def simulate_generation(
                     if pool:
                         resp = str(pool[int(rng.integers(low=0, high=len(pool)))])
                 if allowed_candidate_chunk is not None and step == allowed_candidate_chunk:
-                    cand_attempts += 1
-                    cand_successes += 1 if ok else 0
+                    cand_n += 1
+                    cand_ok += 1 if ok else 0
 
             acc = 1.0 if resp == step else 0.0
             obs_steps.append(
@@ -891,11 +867,13 @@ def simulate_generation(
             )
 
         if allowed_candidate_chunk is not None:
+            used = bool(cand_n > 0)
+            success = bool((float(cand_ok) / float(max(1, cand_n))) >= 0.5) if used else False
             cand_events.append(
                 {
                     "candidate": allowed_candidate_chunk,
-                    "attempts": int(cand_attempts),
-                    "successes": int(cand_successes),
+                    "used": used,
+                    "success": success,
                 }
             )
 
@@ -921,11 +899,10 @@ def run_comm_chain_bayes_rsa(
     num_generations: int = 20,
     lexemes: Optional[Sequence[str]] = None,
     speaker_mode: str = "rsa_program",
-    min_attempts: int = 5,
-    min_success_rate: float = 0.35,
+    min_attempts: int = 8,
+    min_success_rate: float = 0.75,
     p_innovate: float = 0.10,
     pre_promote_chunk_correct: float = 0.40,
-    max_promote_per_gen: int = 1,
     speaker_alpha_prog: float = 2.0,
     speaker_alpha_utt: float = 2.0,
     speaker_beta_cost: float = 0.3,
@@ -970,7 +947,6 @@ def run_comm_chain_bayes_rsa(
         min_success_rate=float(min_success_rate),
         p_innovate=float(p_innovate),
         pre_promote_chunk_correct=float(pre_promote_chunk_correct),
-        max_promote_per_gen=int(max_promote_per_gen),
     )
 
     rng = np.random.default_rng(int(random_seed))
@@ -993,10 +969,10 @@ def run_comm_chain_bayes_rsa(
 
         for ev in list(extra.get("cand_events", [])):
             c = str(ev.get("candidate", ""))
-            attempts = int(ev.get("attempts", 0))
-            successes = int(ev.get("successes", 0))
-            if c and attempts > 0:
-                registry.update_candidate(c, attempts=attempts, successes=successes)
+            used = bool(ev.get("used", False))
+            success = bool(ev.get("success", False))
+            if c and used:
+                registry.update_candidate(c, success=success)
         registry.promote()
 
         summaries.append(
@@ -1008,8 +984,6 @@ def run_comm_chain_bayes_rsa(
                 "ppt_id": float(ppt_id),
                 "speaker_mode": str(speaker_mode),
                 "num_active_chunks": float(len(registry.active_chunks)),
-                "max_candidate_attempts": float(registry.max_candidate_attempts()),
-                "max_candidate_success_rate": float(registry.max_candidate_success_rate()),
             }
         )
 
@@ -1031,34 +1005,3 @@ def run_comm_chain_bayes_rsa(
         )
 
     return pd.DataFrame(summaries)
-
-
-def _run_comm_worker(args: Dict[str, Any]) -> Any:
-    """Picklable worker for parallel runs."""
-    import pandas as pd
-    df = run_comm_chain_bayes_rsa(
-        ppt_id=args["ppt_id"],
-        data_model_dir=args["data_model_dir"],
-        num_generations=args["num_generations"],
-        lexemes=args.get("lexemes"),
-        speaker_mode=args["speaker_mode"],
-        min_attempts=args.get("min_attempts", 10),
-        min_success_rate=args.get("min_success_rate", 0.75),
-        p_innovate=args.get("p_innovate", 0.08),
-        pre_promote_chunk_correct=args.get("pre_promote_chunk_correct", 0.35),
-        max_promote_per_gen=args.get("max_promote_per_gen", 1),
-        speaker_alpha_prog=args.get("speaker_alpha_prog", 2.0),
-        speaker_alpha_utt=args.get("speaker_alpha_utt", 2.0),
-        speaker_beta_cost=args.get("speaker_beta_cost", 0.3),
-        epsilon=args.get("epsilon", 0.01),
-        random_seed=args.get("random_seed", 0),
-        source_subdir=args.get("source_subdir", "programs_for_you"),
-    )
-    df = df.copy()
-    if "model_label" in args:
-        df["model"] = args["model_label"]
-    else:
-        df["model"] = args["speaker_mode"]
-    if "variant" in args:
-        df["variant"] = args["variant"]
-    return df
