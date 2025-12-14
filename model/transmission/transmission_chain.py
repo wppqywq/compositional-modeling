@@ -2,14 +2,15 @@ import math
 import os
 import random
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
-from model.dsl import ast_to_tokens, tokens_to_ast, set_library
-from model.dsl.fragments import Library
-from model.program_induction import discover_fragments, apply_fragments
-from model.eval import ib_loss
+# from model.dsl import ast_to_tokens, tokens_to_ast, set_library
+# from model.dsl.fragments import Library
+# from model.program_induction import discover_fragments, apply_fragments
+# from model.eval import ib_loss
 
 
 MANUAL_TOWER_PROGRAMS: Dict[str, str] = {
@@ -35,6 +36,15 @@ DEFAULT_COMPRESSION_BIAS: Dict[str, float] = {
     "merge_repeats": 0.6,
     "min_repeat": 2.0,
 }
+
+@lru_cache(maxsize=32)
+def _load_trials_cached(path: str) -> Any:
+    import json
+    import pandas as pd
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    return pd.DataFrame(raw)
 
 
 
@@ -226,78 +236,6 @@ def run_chain_with_selection(
     return chain
 
 
-
-def run_chain_ast(
-    initial_program: Sequence[str],
-    num_generations: int,
-    dsl: Optional[Sequence[str]] = None,
-    lambda_c: float = 1.0,
-    lambda_m: float = 1.0,
-    num_candidates: int = 5,
-    fragment_discovery_freq: int = 3,
-    random_seed: Optional[int] = None,
-) -> List[List[str]]:
-    from .selection import (
-        generate_ast_candidates,
-        reconstruction_cost,
-    )
-
-    rng = random.Random(random_seed)
-    
-    library = Library()
-    all_programs = []
-    chain: List[List[str]] = [list(initial_program)]
-    all_programs.append(list(initial_program))
-    current_tokens = list(initial_program)
-    
-    for gen in range(num_generations):
-        should_discover = (
-            gen == 1
-            or (gen > 1 and gen % fragment_discovery_freq == 0 and len(all_programs) > 1)
-        )
-        
-        if should_discover and len(all_programs) >= 2:
-            library = discover_fragments(
-                programs=all_programs,
-                min_length=3,
-                max_length=5,
-                min_freq=2,
-            )
-            set_library(library)
-        
-        current_ast = tokens_to_ast(current_tokens)
-        
-        candidates = generate_ast_candidates(current_ast, num_candidates, rng, library=library)
-        
-        costs = []
-        for cand in candidates:
-            cost = reconstruction_cost(
-                candidate=cand,
-                perceived=current_ast,
-                lambda_c=lambda_c,
-                lambda_m=lambda_m
-            )
-            costs.append(cost)
-        
-        best_idx = min(range(len(candidates)), key=lambda i: costs[i])
-        selected_ast = candidates[best_idx]
-        
-        if len(library) > 0:
-            selected_ast, _ = apply_fragments(selected_ast, library)
-        
-        from model.dsl.parser import set_library as parser_set_library, get_library as parser_get_library
-        old_library = parser_get_library()
-        parser_set_library(None)
-        next_tokens = ast_to_tokens(selected_ast)
-        parser_set_library(old_library)
-        
-        chain.append(next_tokens)
-        all_programs.append(next_tokens)
-        current_tokens = next_tokens
-    
-    return chain
-
-
 def run_chain_ib(
     initial_program: Sequence[str],
     true_program: Sequence[str],
@@ -309,8 +247,12 @@ def run_chain_ib(
     noise_params: Optional[Dict[str, float]] = None,
     use_true_target: bool = False,
     random_seed: Optional[int] = None,
-) -> Tuple[List[List[str]], Library]:
+) -> Tuple[List[List[str]], Any]:
     from .selection import generate_ast_candidates
+    from model.dsl import ast_to_tokens, tokens_to_ast, set_library
+    from model.dsl.fragments import Library
+    from model.program_induction import discover_fragments, apply_fragments
+    from model.eval import ib_loss
     
     rng = random.Random(random_seed)
     true_ast = tokens_to_ast(true_program)
@@ -424,8 +366,11 @@ def run_chain_bayes(
     temperature: float = 0.0,
     noise_params: Optional[Dict[str, float]] = None,
     random_seed: Optional[int] = None,
-) -> Tuple[List[List[str]], Library]:
+) -> Tuple[List[List[str]], Any]:
     from .selection import generate_ast_candidates, select_bayesian_candidate
+    from model.dsl import ast_to_tokens, tokens_to_ast, set_library
+    from model.dsl.fragments import Library
+    from model.program_induction import discover_fragments, apply_fragments
     
     rng = random.Random(random_seed)
     
@@ -511,14 +456,8 @@ def load_empirical_trials(
     base_dir: str,
     source_subdir: str = "programs_for_you",
 ) -> Any:
-    import json
-    import pandas as pd
-
     path = os.path.join(base_dir, source_subdir, f"programs_ppt_{ppt_id}.json")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    df = pd.DataFrame(raw)
-    return df
+    return _load_trials_cached(path).copy()
 
 
 def _expected_inf(
@@ -637,10 +576,11 @@ def _extract_chunks(steps: Sequence[str]) -> Set[str]:
 @dataclass
 class ChunkRegistry:
     all_chunks: Set[str]
-    min_attempts: int = 8
-    min_success_rate: float = 0.75
+    min_attempts: int = 5
+    min_success_rate: float = 0.4
     p_innovate: float = 0.10
-    pre_promote_chunk_correct: float = 0.40
+    pre_promote_chunk_correct: float = 0.44
+    max_promote_per_gen: int = 1
     active_chunks: Set[str] = field(default_factory=set)
     candidate_attempts: Dict[str, int] = field(default_factory=dict)
     candidate_successes: Dict[str, int] = field(default_factory=dict)
@@ -662,23 +602,45 @@ class ChunkRegistry:
             allowed.add(candidate)
         return allowed
 
-    def update_candidate(self, chunk: str, success: bool) -> None:
-        self.candidate_attempts[chunk] = int(self.candidate_attempts.get(chunk, 0)) + 1
-        if success:
-            self.candidate_successes[chunk] = int(self.candidate_successes.get(chunk, 0)) + 1
+    def update_candidate(self, chunk: str, attempts: int, successes: int) -> None:
+        self.candidate_attempts[chunk] = int(self.candidate_attempts.get(chunk, 0)) + int(attempts)
+        self.candidate_successes[chunk] = int(self.candidate_successes.get(chunk, 0)) + int(successes)
+
+    def max_candidate_attempts(self) -> int:
+        return int(max(self.candidate_attempts.values(), default=0))
+
+    def max_candidate_success_rate(self) -> float:
+        best = 0.0
+        for c, a in self.candidate_attempts.items():
+            if c in self.active_chunks:
+                continue
+            aa = int(a)
+            if aa <= 0:
+                continue
+            ss = int(self.candidate_successes.get(c, 0))
+            best = max(best, float(ss) / float(aa))
+        return float(best)
 
     def promote(self) -> List[str]:
-        promoted: List[str] = []
+        eligible = []
         for c, a in list(self.candidate_attempts.items()):
             if c in self.active_chunks:
                 continue
-            if int(a) < int(self.min_attempts):
+            aa = int(a)
+            if aa < int(self.min_attempts):
                 continue
-            s = int(self.candidate_successes.get(c, 0))
-            rate = float(s) / float(max(1, int(a)))
+            ss = int(self.candidate_successes.get(c, 0))
+            rate = float(ss) / float(max(1, aa))
             if rate >= float(self.min_success_rate):
-                self.active_chunks.add(c)
-                promoted.append(c)
+                eligible.append((c, rate, aa))
+        eligible.sort(key=lambda x: (-x[1], -x[2]))
+        promoted: List[str] = []
+        k = int(self.max_promote_per_gen)
+        if k <= 0:
+            return promoted
+        for c, _, _ in eligible[:k]:
+            self.active_chunks.add(c)
+            promoted.append(c)
         return promoted
 
 
@@ -814,9 +776,20 @@ def simulate_generation(
             chosen_program = _choose_program_fixed(programs_with_length, mode="max")
 
         steps = str(chosen_program).split(" ") if chosen_program else []
-        cand_n = 0
-        cand_ok = 0
+        program_len = int(len(steps))
+        lengths = [int(v) for v in list(programs_with_length.values())] if programs_with_length else []
+        if not lengths:
+            L_min, L_max = program_len, program_len
+        else:
+            L_min, L_max = int(min(lengths)), int(max(lengths))
+        denom = float(max(1, L_max - L_min))
+        program_level = float(L_max - program_len) / denom if denom > 0 else 0.0
+
+        cand_attempts = 0
+        cand_successes = 0
         for step in steps:
+            is_chunk = bool(isinstance(step, str) and step.startswith("chunk"))
+            is_active_chunk = bool(registry is not None and is_chunk and step in registry.active_chunks)
             if speaker_mode == "random_utt":
                 utt = str(rng.choice(list(all_utterances)))
             elif speaker_mode == "literal_step":
@@ -841,7 +814,7 @@ def simulate_generation(
                 rng=rng,
             )
 
-            if registry is not None and step.startswith("chunk") and step not in registry.active_chunks:
+            if registry is not None and is_chunk and step not in registry.active_chunks:
                 p_ok = float(registry.pre_promote_chunk_correct)
                 ok = bool(float(rng.random()) < p_ok)
                 if ok:
@@ -851,8 +824,8 @@ def simulate_generation(
                     if pool:
                         resp = str(pool[int(rng.integers(low=0, high=len(pool)))])
                 if allowed_candidate_chunk is not None and step == allowed_candidate_chunk:
-                    cand_n += 1
-                    cand_ok += 1 if ok else 0
+                    cand_attempts += 1
+                    cand_successes += 1 if ok else 0
 
             acc = 1.0 if resp == step else 0.0
             obs_steps.append(
@@ -863,17 +836,19 @@ def simulate_generation(
                     "intention": step,
                     "target_program": chosen_program,
                     "acc": acc,
+                    "is_chunk": 1.0 if is_chunk else 0.0,
+                    "is_active_chunk": 1.0 if is_active_chunk else 0.0,
+                    "program_len": float(program_len),
+                    "program_level": float(program_level),
                 }
             )
 
         if allowed_candidate_chunk is not None:
-            used = bool(cand_n > 0)
-            success = bool((float(cand_ok) / float(max(1, cand_n))) >= 0.5) if used else False
             cand_events.append(
                 {
                     "candidate": allowed_candidate_chunk,
-                    "used": used,
-                    "success": success,
+                    "attempts": int(cand_attempts),
+                    "successes": int(cand_successes),
                 }
             )
 
@@ -885,13 +860,18 @@ def simulate_generation(
             .apply(lambda s: len(str(s.iloc[0]).split(" ")))
             .mean()
         )
-        frag_rate = float(gen_df["intention"].astype(str).str.startswith("chunk").mean())
+        frag_rate = float(gen_df["is_chunk"].mean())
+        num_chunk_steps = float(gen_df["is_chunk"].sum())
+        active_chunk_rate = float(gen_df["is_active_chunk"].sum()) / float(max(1.0, num_chunk_steps)) if num_chunk_steps > 0 else 0.0
+        program_level_mean = float(gen_df.groupby("trial")["program_level"].first().mean())
     else:
         msg_len = 0.0
         frag_rate = 0.0
+        active_chunk_rate = 0.0
+        program_level_mean = 0.0
 
     extra = {"cand_events": cand_events}
-    return gen_df, {"acc_comm": acc_comm, "msg_len": msg_len, "frag_rate": frag_rate}, extra
+    return gen_df, {"acc_comm": acc_comm, "msg_len": msg_len, "frag_rate": frag_rate, "active_chunk_rate": active_chunk_rate, "program_level": program_level_mean}, extra
 
 def run_comm_chain_bayes_rsa(
     ppt_id: int,
@@ -899,16 +879,19 @@ def run_comm_chain_bayes_rsa(
     num_generations: int = 20,
     lexemes: Optional[Sequence[str]] = None,
     speaker_mode: str = "rsa_program",
-    min_attempts: int = 8,
-    min_success_rate: float = 0.75,
+    min_attempts: int = 5,
+    min_success_rate: float = 0.4,
     p_innovate: float = 0.10,
-    pre_promote_chunk_correct: float = 0.40,
+    pre_promote_chunk_correct: float = 0.55,
+    max_promote_per_gen: int = 1,
     speaker_alpha_prog: float = 2.0,
     speaker_alpha_utt: float = 2.0,
     speaker_beta_cost: float = 0.3,
     epsilon: float = 0.01,
     random_seed: int = 0,
     source_subdir: str = "programs_for_you",
+    trace_gens: Optional[Sequence[int]] = None,
+    return_traces: bool = False,
 ) -> Any:
     import pandas as pd
     from model.convention_formation.distribution import LexiconPrior, Distribution
@@ -947,10 +930,14 @@ def run_comm_chain_bayes_rsa(
         min_success_rate=float(min_success_rate),
         p_innovate=float(p_innovate),
         pre_promote_chunk_correct=float(pre_promote_chunk_correct),
+        max_promote_per_gen=int(max_promote_per_gen),
     )
 
     rng = np.random.default_rng(int(random_seed))
     summaries: List[Dict[str, Any]] = []
+    traces: Dict[int, Any] = {}
+    trace_set: Set[int] = set(int(x) for x in list(trace_gens)) if trace_gens is not None else set()
+    seen_chunks_used: Set[str] = set()
 
     for gen in range(int(num_generations)):
         gen_df, summary, extra = simulate_generation(
@@ -967,13 +954,29 @@ def run_comm_chain_bayes_rsa(
             rng=rng,
         )
 
+        if int(gen) in trace_set:
+            traces[int(gen)] = gen_df.copy()
+
         for ev in list(extra.get("cand_events", [])):
             c = str(ev.get("candidate", ""))
-            used = bool(ev.get("used", False))
-            success = bool(ev.get("success", False))
-            if c and used:
-                registry.update_candidate(c, success=success)
-        registry.promote()
+            attempts = int(ev.get("attempts", 0))
+            successes = int(ev.get("successes", 0))
+            if c and attempts > 0:
+                registry.update_candidate(c, attempts=attempts, successes=successes)
+        promoted = registry.promote()
+
+        chunks_used_set: Set[str] = set()
+        if gen_df is not None and len(gen_df) > 0:
+            chunks_used_set = set(
+                str(x) for x in gen_df.loc[gen_df["is_chunk"] > 0.0, "intention"].astype(str).tolist()
+            )
+        new_chunks_used = set(chunks_used_set - set(seen_chunks_used))
+        reuse_chunk_rate = (
+            float(len(chunks_used_set & set(seen_chunks_used))) / float(max(1, len(chunks_used_set)))
+            if len(chunks_used_set) > 0
+            else 0.0
+        )
+        seen_chunks_used |= set(chunks_used_set)
 
         summaries.append(
             {
@@ -981,9 +984,18 @@ def run_comm_chain_bayes_rsa(
                 "acc_comm": float(summary["acc_comm"]),
                 "msg_len": float(summary["msg_len"]),
                 "frag_rate": float(summary["frag_rate"]),
+                "active_chunk_rate": float(summary.get("active_chunk_rate", 0.0)),
+                "program_level": float(summary.get("program_level", 0.0)),
                 "ppt_id": float(ppt_id),
                 "speaker_mode": str(speaker_mode),
                 "num_active_chunks": float(len(registry.active_chunks)),
+                "max_candidate_attempts": float(registry.max_candidate_attempts()),
+                "max_candidate_success_rate": float(registry.max_candidate_success_rate()),
+                "num_chunks_used": float(len(chunks_used_set)),
+                "num_new_chunks_used": float(len(new_chunks_used)),
+                "reuse_chunk_rate": float(reuse_chunk_rate),
+                "chunks_used": "|".join(sorted(list(chunks_used_set))),
+                "num_promoted_this_gen": float(len(promoted)),
             }
         )
 
@@ -1004,4 +1016,37 @@ def run_comm_chain_bayes_rsa(
             epsilon=epsilon,
         )
 
-    return pd.DataFrame(summaries)
+    out_df = pd.DataFrame(summaries)
+    if bool(return_traces):
+        return out_df, traces
+    return out_df
+
+
+def _run_comm_worker(args: Dict[str, Any]) -> Any:
+    import pandas as pd
+
+    res = run_comm_chain_bayes_rsa(
+        ppt_id=int(args["ppt_id"]),
+        data_model_dir=str(args["data_model_dir"]),
+        num_generations=int(args["num_generations"]),
+        lexemes=args.get("lexemes"),
+        speaker_mode=str(args["speaker_mode"]),
+        min_attempts=int(args.get("min_attempts", 5)),
+        min_success_rate=float(args.get("min_success_rate", 0.30)),
+        p_innovate=float(args.get("p_innovate", 0.10)),
+        pre_promote_chunk_correct=float(args.get("pre_promote_chunk_correct", 0.60)),
+        max_promote_per_gen=int(args.get("max_promote_per_gen", 1)),
+        speaker_alpha_prog=float(args.get("speaker_alpha_prog", 2.0)),
+        speaker_alpha_utt=float(args.get("speaker_alpha_utt", 2.0)),
+        speaker_beta_cost=float(args.get("speaker_beta_cost", 0.3)),
+        epsilon=float(args.get("epsilon", 0.01)),
+        random_seed=int(args.get("random_seed", 0)),
+        source_subdir=str(args.get("source_subdir", "programs_for_you")),
+    ).copy()
+    df = res[0] if isinstance(res, tuple) else res
+    df = df.copy()
+
+    df["model"] = str(args["model_label"]) if "model_label" in args else str(args["speaker_mode"])
+    if "variant" in args:
+        df["variant"] = str(args["variant"])
+    return pd.DataFrame(df)
