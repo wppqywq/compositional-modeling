@@ -20,6 +20,7 @@ New modular components:
 
 Build an iterated transmission-chain setting, to study how compositional abstractions and lexical conventions stabilize under repeated cultural transmission.
 
+**Future Directions**: Please check [`future_works.md`](future_works.md).
 
 ### Settings
 
@@ -55,6 +56,3 @@ freeze the final lexicon posterior and active chunks of agent learned for 50 gen
 
 Details of metrics please refer to the notebooks.
 
-## Future Directions
-
-Please check [`future_works.md`](future_works.md).
