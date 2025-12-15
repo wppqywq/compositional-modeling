@@ -1,4 +1,4 @@
-## Compositional Abstractions Tutorial (Personal Copy)
+# Compositional Abstractions Tutorial (Personal Copy)
 
 This repository is a personal working copy of the original project [`cogtoolslab/compositional-abstractions-tutorial`](https://github.com/cogtoolslab/compositional-abstractions-tutorial).
 
@@ -6,9 +6,9 @@ For the original documentation, please see [`README_original.md`](./README_origi
 
 ### Extended modules
 
-Main notebooks to execute:
+Main notebooks(Clone this repo and execute directly.):
 - [`notebooks_new/5_communication_chain.ipynb`](notebooks_new/5_communication_chain.ipynb): Communication system evolution (based on agents from notebook3). Meanings are fixed from empirical trials; conventions and chunk usage evolve across generations.
-- [`notebooks_new/6_social_conventions.ipynb`](notebooks_new/6_social_conventions.ipynb): The final generation of the rsa transmission chain (e.g. Generation 50) is evaluated on a new set of held-out trials, without further learning or chunk promotion (frozen evaluation).
+- [`notebooks_new/6_social_conventions.ipynb`](notebooks_new/6_social_conventions.ipynb): The final generation of the transmission chain (e.g. Generation 50) is evaluated on a new set of held-out trials, without further learning or chunk promotion (frozen evaluation).
 
 New modular components:
 - `model/transmission/transmission_chain.py`: evolution chain runner (`run_comm_chain_bayes_rsa`).
@@ -16,16 +16,17 @@ New modular components:
 
 ---
 
-# Review of Notebook 5 & 6
+## Review of Notebook 5 & 6
 
-Question: compositional representations stabilize through repeated transmission under constraints. Does shared abstraction really require population-level agreement, or is local success sufficient?
+Build an iterated transmission-chain setting, to study how compositional abstractions and lexical conventions stabilize under repeated cultural transmission.
+
 
 ### Settings
 
 Meaning:
 - Meanings are fixed across generation
 - Means represent as tower-building programs in DSL, in multiple program-level(fully decompositions -> reuseable chunks).
-Assume: abstraction arises from choosing among alternative descriptions of the same underlying structure, not new meanings.
+> Assume: abstraction arises from choosing among alternative descriptions of the same underlying structure, not new meanings.
 
 ---
 
@@ -41,22 +42,19 @@ transmission chain:
 - Each step produces (utterance, intention, listener response) observations.
 - End of each generation: both agents update their lexicon beliefs from observation (iterated learning)
 
-In the original paper, abstract fragments are assumed to be shared components of the DSL. Here we specify abstract chunks must earn their sharedness through communicative use.
-
-The aim is to distinguish from individual-level interaction to social conventions.
-
----
-Gated Promotion Rule:
-
-Candidate abstraction can becom shared chunk only if they:
-- be used often
-- achieve a minimum listener success rate at step level
-- per generation cap is not reached
+> Question: Does too fast abstraction cause early lock-in?
+>
+>Here we specify abstract chunks must earn their sharedness through communicative use, to distinguish from individual-level interaction to social conventions. Result in Notebook5 shows that adding this gate do slow down the processe but no effect on the final communicative competence.
 
 ---
+
 Generalization:
 
-freeze the final lexicon posterior and active chunks of the rsa agent trained learned for 50 generations, evaluate on held-out participants (same data distribution, unseen trials/programs per participant)
+freeze the final lexicon posterior and active chunks of agent learned for 50 generations, evaluate on held-out participants (same data distribution, unseen trials/programs per participant)
 - Track entropy during training (program-choice entropy; lexeme-mapping posterior entropy) to evaluate stababilization.
 
 Details of metrics please refer to the notebooks.
+
+## Future Directions
+
+Please check [`future_works.md`](future_works.md).
