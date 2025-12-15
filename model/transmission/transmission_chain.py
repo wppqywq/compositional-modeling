@@ -451,6 +451,43 @@ def _softmax_np(x: np.ndarray, temperature: float = 1.0) -> np.ndarray:
     return e / s if s > 0 else np.ones_like(e) / float(len(e))
 
 
+def _entropy_np(probs: np.ndarray) -> float:
+    p = np.array(probs, dtype=float)
+    p = p[p > 0]
+    if len(p) == 0:
+        return 0.0
+    return float(-np.sum(p * np.log(p)))
+
+
+def compute_lexeme_mapping_entropy(
+    beliefs: Any,
+    utterances: Sequence[str],
+    actions: Sequence[str],
+    epsilon: float = 0.01,
+) -> float:
+    if not utterances or not actions:
+        return 0.0
+    action_list = list(actions)
+    entropies: List[float] = []
+    for utt in utterances:
+        probs = np.zeros(len(action_list), dtype=float)
+        for lex in beliefs.support():
+            pL = float(beliefs.score(lex))
+            if pL <= 0.0:
+                continue
+            intended = lex.language_to_dsl(utt)
+            for i, a in enumerate(action_list):
+                if intended == a:
+                    probs[i] += pL * 1.0
+                else:
+                    probs[i] += pL * float(epsilon)
+        s = float(np.sum(probs))
+        if s > 0:
+            probs = probs / s
+        entropies.append(_entropy_np(probs))
+    return float(np.mean(entropies)) if entropies else 0.0
+
+
 def load_empirical_trials(
     ppt_id: int,
     base_dir: str,
@@ -486,10 +523,15 @@ def _choose_utterance(
     speaker_alpha: float,
     epsilon: float,
     rng: np.random.Generator,
+    inf_cache: Optional[Dict[Tuple[str, str], float]] = None,
 ) -> str:
     utils = np.array(
         [
-            _expected_inf(beliefs, u, intention, actions=actions, epsilon=epsilon)
+            (
+                float(inf_cache[(str(u), str(intention))])
+                if inf_cache is not None and (str(u), str(intention)) in inf_cache
+                else _expected_inf(beliefs, u, intention, actions=actions, epsilon=epsilon)
+            )
             for u in utterances
         ],
         dtype=float,
@@ -507,6 +549,7 @@ def _program_utility(
     speaker_alpha: float,
     speaker_beta_cost: float,
     epsilon: float,
+    inf_cache: Optional[Dict[Tuple[str, str], float]] = None,
 ) -> float:
     if len(program_steps) == 0:
         return -1e9
@@ -515,7 +558,11 @@ def _program_utility(
     for step in program_steps:
         utt_utils = np.array(
             [
-                _expected_inf(beliefs, u, step, actions=actions, epsilon=epsilon)
+                (
+                    float(inf_cache[(str(u), str(step))])
+                    if inf_cache is not None and (str(u), str(step)) in inf_cache
+                    else _expected_inf(beliefs, u, step, actions=actions, epsilon=epsilon)
+                )
                 for u in utterances
             ],
             dtype=float,
@@ -538,7 +585,9 @@ def _choose_program_representation(
     speaker_beta_cost: float,
     epsilon: float,
     rng: np.random.Generator,
-) -> str:
+    return_entropy: bool = False,
+    inf_cache: Optional[Dict[Tuple[str, str], float]] = None,
+) -> Any:
     programs = list(programs_with_length.keys())
     utils = np.array(
         [
@@ -550,6 +599,7 @@ def _choose_program_representation(
                 speaker_alpha=speaker_alpha_utt,
                 speaker_beta_cost=speaker_beta_cost,
                 epsilon=epsilon,
+                inf_cache=inf_cache,
             )
             for p in programs
         ],
@@ -557,7 +607,11 @@ def _choose_program_representation(
     )
     probs = _softmax_np(speaker_alpha_prog * utils, temperature=1.0)
     idx = int(rng.choice(len(programs), p=probs))
-    return str(programs[idx])
+    chosen = str(programs[idx])
+    if return_entropy:
+        entropy = _entropy_np(probs)
+        return chosen, entropy
+    return chosen
 
 
 def _choose_program_fixed(programs_with_length: Dict[str, int], mode: str = "max") -> str:
@@ -732,9 +786,22 @@ def simulate_generation(
 
     obs_steps: List[Dict[str, Any]] = []
     cand_events: List[Dict[str, Any]] = []
+    prog_choice_entropies: List[float] = []
     for _, trial in trials.iterrows():
         actions = list(trial["dsl"])
         programs_with_length = dict(trial["programs_with_length"])
+
+        inf_cache: Dict[Tuple[str, str], float] = {}
+        intentions_set: Set[str] = set(str(a) for a in actions)
+        for p in programs_with_length.keys():
+            steps_p = str(p).split(" ") if p else []
+            for s in steps_p:
+                intentions_set.add(str(s))
+        for intent in intentions_set:
+            for u in all_utterances:
+                inf_cache[(str(u), str(intent))] = _expected_inf(
+                    arch_prior, str(u), str(intent), actions=actions, epsilon=epsilon
+                )
 
         allowed_candidate_chunk: Optional[str] = None
         allowed_chunks: Optional[Set[str]] = None
@@ -761,7 +828,7 @@ def simulate_generation(
                 programs_with_length = filtered
 
         if speaker_mode == "rsa_program":
-            chosen_program = _choose_program_representation(
+            chosen_program, prog_ent = _choose_program_representation(
                 beliefs=arch_prior,
                 programs_with_length=programs_with_length,
                 utterances=all_utterances,
@@ -771,7 +838,10 @@ def simulate_generation(
                 speaker_beta_cost=speaker_beta_cost,
                 epsilon=epsilon,
                 rng=rng,
+                return_entropy=True,
+                inf_cache=inf_cache,
             )
+            prog_choice_entropies.append(float(prog_ent))
         else:
             chosen_program = _choose_program_fixed(programs_with_length, mode="max")
 
@@ -804,6 +874,7 @@ def simulate_generation(
                     speaker_alpha=speaker_alpha_utt,
                     epsilon=epsilon,
                     rng=rng,
+                    inf_cache=inf_cache,
                 )
 
             resp = _literal_builder_act(
@@ -870,8 +941,9 @@ def simulate_generation(
         active_chunk_rate = 0.0
         program_level_mean = 0.0
 
+    prog_choice_ent_mean = float(np.mean(prog_choice_entropies)) if prog_choice_entropies else 0.0
     extra = {"cand_events": cand_events}
-    return gen_df, {"acc_comm": acc_comm, "msg_len": msg_len, "frag_rate": frag_rate, "active_chunk_rate": active_chunk_rate, "program_level": program_level_mean}, extra
+    return gen_df, {"acc_comm": acc_comm, "msg_len": msg_len, "frag_rate": frag_rate, "active_chunk_rate": active_chunk_rate, "program_level": program_level_mean, "program_choice_entropy": prog_choice_ent_mean}, extra
 
 def run_comm_chain_bayes_rsa(
     ppt_id: int,
@@ -892,6 +964,11 @@ def run_comm_chain_bayes_rsa(
     source_subdir: str = "programs_for_you",
     trace_gens: Optional[Sequence[int]] = None,
     return_traces: bool = False,
+    init_arch_prior: Optional[Any] = None,
+    init_build_prior: Optional[Any] = None,
+    init_active_chunks: Optional[Set[str]] = None,
+    freeze_updates: bool = False,
+    return_final_state: bool = False,
 ) -> Any:
     import pandas as pd
     from model.convention_formation.distribution import LexiconPrior, Distribution
@@ -912,8 +989,8 @@ def run_comm_chain_bayes_rsa(
     all_utterances = sorted(list(utt_lex.utterances))
 
     prior0 = LexiconPrior(full_dsl, list(lexemes))
-    arch_prior: Distribution = prior0
-    build_prior: Distribution = prior0
+    arch_prior: Distribution = init_arch_prior if init_arch_prior is not None else prior0
+    build_prior: Distribution = init_build_prior if init_build_prior is not None else prior0
 
     all_chunks: Set[str] = set()
     for _, tr in trials.iterrows():
@@ -928,10 +1005,12 @@ def run_comm_chain_bayes_rsa(
         all_chunks=set(all_chunks),
         min_attempts=int(min_attempts),
         min_success_rate=float(min_success_rate),
-        p_innovate=float(p_innovate),
+        p_innovate=float(p_innovate) if not freeze_updates else 0.0,
         pre_promote_chunk_correct=float(pre_promote_chunk_correct),
-        max_promote_per_gen=int(max_promote_per_gen),
+        max_promote_per_gen=int(max_promote_per_gen) if not freeze_updates else 0,
     )
+    if init_active_chunks is not None:
+        registry.active_chunks = set(init_active_chunks)
 
     rng = np.random.default_rng(int(random_seed))
     summaries: List[Dict[str, Any]] = []
@@ -978,6 +1057,10 @@ def run_comm_chain_bayes_rsa(
         )
         seen_chunks_used |= set(chunks_used_set)
 
+        arch_lex_ent = compute_lexeme_mapping_entropy(arch_prior, all_utterances, full_dsl, epsilon)
+        build_lex_ent = compute_lexeme_mapping_entropy(build_prior, all_utterances, full_dsl, epsilon)
+        lexeme_mapping_ent = float(arch_lex_ent + build_lex_ent) / 2.0
+
         summaries.append(
             {
                 "generation": float(gen),
@@ -986,6 +1069,8 @@ def run_comm_chain_bayes_rsa(
                 "frag_rate": float(summary["frag_rate"]),
                 "active_chunk_rate": float(summary.get("active_chunk_rate", 0.0)),
                 "program_level": float(summary.get("program_level", 0.0)),
+                "program_choice_entropy": float(summary.get("program_choice_entropy", 0.0)),
+                "lexeme_mapping_entropy": float(lexeme_mapping_ent),
                 "ppt_id": float(ppt_id),
                 "speaker_mode": str(speaker_mode),
                 "num_active_chunks": float(len(registry.active_chunks)),
@@ -999,24 +1084,34 @@ def run_comm_chain_bayes_rsa(
             }
         )
 
-        arch_prior = _update_posterior(
-            role="architect",
-            prior=arch_prior,
-            observations_df=gen_df,
-            actions=full_dsl,
-            utterances=all_utterances,
-            epsilon=epsilon,
-        )
-        build_prior = _update_posterior(
-            role="builder",
-            prior=build_prior,
-            observations_df=gen_df,
-            actions=full_dsl,
-            utterances=all_utterances,
-            epsilon=epsilon,
-        )
+        if not freeze_updates:
+            arch_prior = _update_posterior(
+                role="architect",
+                prior=arch_prior,
+                observations_df=gen_df,
+                actions=full_dsl,
+                utterances=all_utterances,
+                epsilon=epsilon,
+            )
+            build_prior = _update_posterior(
+                role="builder",
+                prior=build_prior,
+                observations_df=gen_df,
+                actions=full_dsl,
+                utterances=all_utterances,
+                epsilon=epsilon,
+            )
 
     out_df = pd.DataFrame(summaries)
+    final_state = {
+        "arch_prior": arch_prior,
+        "build_prior": build_prior,
+        "active_chunks": set(registry.active_chunks),
+    }
+    if bool(return_final_state) and bool(return_traces):
+        return out_df, traces, final_state
+    if bool(return_final_state):
+        return out_df, final_state
     if bool(return_traces):
         return out_df, traces
     return out_df
