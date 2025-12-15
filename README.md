@@ -25,7 +25,7 @@ Build an iterated transmission-chain setting, to study how compositional abstrac
 ### Settings
 
 Meaning:
-- Meanings are fixed across generation
+- Meanings(trails) are fixed across generation.
 - Means represent as tower-building programs in DSL, in multiple program-level(fully decompositions -> reuseable chunks).
 > Assume: abstraction arises from choosing among alternative descriptions of the same underlying structure, not new meanings.
 
@@ -37,7 +37,7 @@ Communication:
 
 ---
 
-transmission chain:
+Transmission chain:
 - At each generation: one speaker–listener pair communicates over a fixed set of trials (e.g. 12 towers in `data/model/programs_for_you/programs_ppt_1.json`).
 - Each trial produces a set of steps(programs), (msg_len=#programs).
 - Each step produces (utterance, intention, listener response) observations.
@@ -45,14 +45,18 @@ transmission chain:
 
 > Question: Does too fast abstraction cause early lock-in?
 >
->Here we specify abstract chunks must earn their sharedness through communicative use, to distinguish from individual-level interaction to social conventions. Result in Notebook5 shows that adding this gate do slow down the processe but no effect on the final communicative competence.
+>Here we specify abstract chunks must earn their sharedness through communication (high usage_freq, high correction_rate), to distinguish from individual-level interaction to social conventions. Result in Notebook5 shows that adding this gate do slow down the processe but no effect on the final communicative competence.
 
 ---
 
 Generalization:
 
-freeze the final lexicon posterior and active chunks of agent learned for 50 generations, evaluate on held-out participants (same data distribution, unseen trials/programs per participant)
+Freeze the final lexicon posterior and active chunks of agent learned for 50 generations, evaluate on held-out participants (same data distribution, unseen trials/programs per participant)
 - Track entropy during training (program-choice entropy; lexeme-mapping posterior entropy) to evaluate stababilization.
+
+> Question: Does the agents successed in first-seem task, given lexicon prior knowledge learned from 50 generations?
+>
+> The RSA agent (StrategicAgent) and the literal_step (LearningAgent) both remian the high accuracy across 9 distinct sets of trials, RSA agent achieve a compression level as in the training trails.
 
 Details of metrics please refer to the notebooks.
 
