@@ -18,7 +18,6 @@ New modular components:
 
 # Review of Notebook 5 & 6
 
-### Goal
 Question: compositional representations stabilize through repeated transmission under constraints. Does shared abstraction really require population-level agreement, or is local success sufficient?
 
 ### Settings
@@ -26,12 +25,16 @@ Question: compositional representations stabilize through repeated transmission 
 Meaning:
 - Meanings are fixed across generation
 - Means represent as tower-building programs in DSL, in multiple program-level(fully decompositions -> reuseable chunks).
-> Assume: abstraction arises from choosing among alternative descriptions of the same underlying structure, not new meanings.
+Assume: abstraction arises from choosing among alternative descriptions of the same underlying structure, not new meanings.
+
 ---
+
 Communication:
 - Speakers choose: (i) program representation to express; (ii) utterance to use for each step.
 - Softmax balance: (i) expected listener success, (ii) message length / chunk usage (cost)
+
 ---
+
 transmission chain:
 - At each generation: one speaker–listener pair communicates over a fixed set of trials (e.g. 12 towers in `data/model/programs_for_you/programs_ppt_1.json`).
 - Each trial produces a set of steps(programs), (msg_len=#programs).
@@ -41,6 +44,7 @@ transmission chain:
 In the original paper, abstract fragments are assumed to be shared components of the DSL. Here we specify abstract chunks must earn their sharedness through communicative use.
 
 The aim is to distinguish from individual-level interaction to social conventions.
+
 ---
 Gated Promotion Rule:
 
@@ -48,6 +52,7 @@ Candidate abstraction can becom shared chunk only if they:
 - be used often
 - achieve a minimum listener success rate at step level
 - per generation cap is not reached
+
 ---
 Generalization:
 
