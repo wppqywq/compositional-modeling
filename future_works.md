@@ -1,6 +1,6 @@
 ## Discussion and Future Directions
 
-In notebook 5 & 6, we set the underlying meanings (tower programs) to be fixed, allowing us to isolate how compositional abstractions evolve under iterated cultural transmission. 
+In notebook 5, we set the underlying meanings (tower programs) to be fixed, allowing us to isolate how compositional abstractions evolve under iterated cultural transmission. 
 
 This restriction is deliberate: when meanings are allowed to drift simultaneously with representations, it becomes difficult to attribute changes in abstraction to either transmission dynamics or semantic change.
 
@@ -18,7 +18,7 @@ Possible method: running the communication chain multiple times with different r
 
 More general transmission settings can be explored in which meanings themselves are allowed to vary. 
 
-`notebooks_new/4_transmission_chain.ipynb` suggest that relaxing this constraint introduces additional degrees of freedom that require a clearer baseline understanding of abstraction stability before meaningful results. (have to verify $p(z \mid x;\theta)$ under $\theta$ and fixe $x$, before computing $p(z_t \mid x_t;\theta)$, $x_t \sim p(x_{t-1})$ )
+Relaxing this constraint introduces additional degrees of freedom that require a clearer baseline understanding of abstraction stability before meaningful results. (have to verify $p(z \mid x;\theta)$ under $\theta$ and fixe $x$, before computing $p(z_t \mid x_t;\theta)$, $x_t \sim p(x_{t-1})$ )
 
 Validate identifiability under fixed meanings (direction 1) is a necessary foundation for such extensions.
 

@@ -7,8 +7,8 @@ For the original documentation, please see [`README_original.md`](./README_origi
 ### Extended modules
 
 Main notebooks(Clone this repo and execute directly.):
-- [`notebooks_new/5_communication_chain.ipynb`](notebooks_new/5_communication_chain.ipynb): Communication system evolution (based on agents from notebook3). Meanings are fixed from empirical trials; conventions and chunk usage evolve across generations.
-- [`notebooks_new/6_social_conventions.ipynb`](notebooks_new/6_social_conventions.ipynb): The final generation of the transmission chain (e.g. Generation 50) is evaluated on a new set of held-out trials, without further learning or chunk promotion (frozen evaluation).
+- [`notebooks_new/5_communication_chains.ipynb`](notebooks_new/5_communication_chains.ipynb): Communication system evolution (based on agents from notebook3). Meanings are fixed from empirical trials; conventions and chunk usage evolve across generations. 
+
 
 New modular components:
 - `model/transmission/transmission_chain.py`: evolution chain runner (`run_comm_chain_bayes_rsa`).
@@ -16,7 +16,7 @@ New modular components:
 
 ---
 
-## Review of Notebook 5 & 6
+## Review of Notebook 5
 
 Build an iterated transmission-chain setting, to study how compositional abstractions and lexical conventions stabilize under repeated cultural transmission.
 
@@ -25,9 +25,11 @@ Build an iterated transmission-chain setting, to study how compositional abstrac
 ### Settings
 
 Meaning:
-- Meanings(trails) are fixed across generation.
-- Means represent as tower-building programs in DSL, in multiple program-level(fully decompositions -> reuseable chunks).
-> Assume: abstraction arises from choosing among alternative descriptions of the same underlying structure, not new meanings.
+- Meaning is the scene (tower arrangement), fixed across generations.
+- Each scene has multiple program representations in a DSL (from fully decomposed steps to chunk-reusing descriptions).
+
+> Assumption:
+> Abstraction in this setting arises from choosing among alternative descriptions of the same underlying structure, not from inventing new meanings.
 
 ---
 
@@ -38,25 +40,33 @@ Communication:
 ---
 
 Transmission chain:
-- At each generation: one speaker–listener pair communicates over a fixed set of trials (e.g. 12 towers in `data/model/programs_for_you/programs_ppt_1.json`).
-- Each trial produces a set of steps(programs), (msg_len=#programs).
+- At each generation: one speaker-listener pair communicates over a fixed distribution of trials.
+- Training:
+  - Random select one `ppt_id` each generation.
+  - Use only the first 5 tower types in the manual ordering (`CL`, `CPi`, `PiC`, `LPi`, `LC`), which correspond to 10 trials.
+  - The remaining tower type (`PiL`) is held out as a small test task (2 trials per participant).
+- Message length `msg_len`: the number of steps / trial.
 - Each step produces (utterance, intention, listener response) observations.
 - End of each generation: both agents update their lexicon beliefs from observation (iterated learning)
 
 > Question: Does too fast abstraction cause early lock-in?
 >
->Here we specify abstract chunks must earn their sharedness through communication (high usage_freq, high correction_rate), to distinguish from individual-level interaction to social conventions. Result in Notebook5 shows that adding this gate do slow down the processe but no effect on the final communicative competence.
+> Here we specify abstract chunks must earn their sharedness through communication (high usage_freq, high correction_rate), to distinguish from individual-level interaction to social conventions. 
+>
+> Result in Notebook5 shows that adding this gate do stabilize the accuracy, and slow down the compression.
 
 ---
 
 Generalization:
 
-Freeze the final lexicon posterior and active chunks of agent learned for 50 generations, evaluate on held-out participants (same data distribution, unseen trials/programs per participant)
-- Track entropy during training (program-choice entropy; lexeme-mapping posterior entropy) to evaluate stababilization.
+Freeze the final lexicon posterior and active chunks learned during training, then evaluate on held-out participants.
+- Test:
+  - Use the held-out tower type (`PiL`) only (2 trials per participant).
+  - Evaluate on a random subset of 10 participants.
 
 > Question: Does the agents successed in first-seem task, given lexicon prior knowledge learned from 50 generations?
 >
-> The RSA agent (StrategicAgent) and the literal_step (LearningAgent) both remian the high accuracy across 9 distinct sets of trials, RSA agent achieve a compression level as in the training trails.
+> All agents remian the high accuracy across trials, RSA agent achieve a compression level as in the training trails.
 
-Details of metrics please refer to the notebooks.
+Details of metrics please refer to the notebook.
 
