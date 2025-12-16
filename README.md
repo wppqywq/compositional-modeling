@@ -10,10 +10,6 @@ Main notebooks(Clone this repo and execute directly.):
 - [`notebooks_new/5_communication_chains.ipynb`](notebooks_new/5_communication_chains.ipynb): Communication system evolution (based on agents from notebook3). Meanings are fixed from empirical trials; conventions and chunk usage evolve across generations. 
 
 
-New modular components:
-- `model/transmission/transmission_chain.py`: evolution chain runner (`run_comm_chain_bayes_rsa`).
-- `model/convention_formation/`: Notebook3 convention formation code (lexicon + priors + Bayesian update) reused by notebook5.
-
 ---
 
 ## Review of Notebook 5
