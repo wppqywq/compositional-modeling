@@ -2,7 +2,7 @@
 
 This project studies how communicative conventions and compositional abstractions stabilize under iterated cultural transmission.
 
-In the current experiments (Notebook 5), underlying meanings (towers) are fixed across generations.
+In the current experiments (Notebook 5 & 6), underlying meanings (towers) are fixed across generations.
 This design choice isolates changes in communicative abstractions from changes in semantics.
 <!-- The system can be described as $p(z \mid x; \theta)$ under fixed $x$, where $z$ denotes program abstractions and $\theta$ denotes speaker and listener policies. -->
 
@@ -31,7 +31,7 @@ More general transmission settings can be explored in which meanings themselves 
 
 Relaxing this constraint introduces additional degrees of freedom, and require a clearer baseline understanding of abstraction stability from direction 1. Otherwise, we may confuse semantic changes with the representation instability.
 
-(must within known distrbution $p(z \mid x;\theta)$ under representatoin $z$, policy $\theta$ and fixed meanning $x$, one can compute $p(z_t \mid x_t;\theta)$, $x_t \sim p(x_{t-1})$)
+(must within known distrbution $p(z \mid x;\theta)$ under representatoin $z$, policy $\theta$ and fixed meanning $x$, one can compute $p(z_t \mid x_t;\theta)$, $x_t \sim p(x_{t-1})$ )
 
 
 ### 3. Complex System for Social dynamics
