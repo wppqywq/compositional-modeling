@@ -1,0 +1,9 @@
+============================================================
+Running Speaker Policy Models
+============================================================
+Found 49 participants
+Building global DSL...
+DSL size: 33, Utterances: 33
+
+Running 4 models in parallel...
+------------------------------------------------------------
