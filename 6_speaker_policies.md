@@ -156,3 +156,14 @@ Bentley, R. A., Lipo, C. P., Herzog, H. A., & Hahn, M. W. (2007). Regular rates 
 
 See `model/speaker_policies.py`.
 
+## Note on Cultural Transmission in Chains
+
+In iterated learning chains (e.g. Notebook 5/6), generations do **not** pass full posteriors between agents. Cultural transmission is modeled as a bottleneck over **observable behavior**:
+
+- Transmit a bottlenecked set of observation pairs (intention, utterance), with minimal trial metadata (e.g. `trial`, `step_idx`) when needed to reconstruct variant keys.
+- The learner restarts inference from `LexiconPrior` and updates beliefs using adaptive weights:
+  $$\log posterior \propto \alpha_t \log prior + \beta_t \log likelihood$$
+  where $\alpha_t,\beta_t$ depend on transmission fidelity (e.g. communication accuracy).
+
+This separates cultural transmission (lossy, external signals) from full posterior inheritance (internal belief passing).
+

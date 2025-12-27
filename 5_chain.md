@@ -31,7 +31,8 @@ Two roles: Speaker (Architect) and Listener (Builder). Both update lexicon belie
   - The remaining tower type (`PiL`) is held out as a small test task (2 trials per participant).
 - Message length `msg_len`: the number of steps / trial.
 - Each step produces (utterance, intention, listener response) observations.
-- End of each generation: both agents update their lexicon beliefs from observation (iterated learning)
+- End of each generation: **cultural transmission is observation-only**. The next generation does **not** inherit the previous generation's full posterior. Instead, it receives a bottlenecked set of transmitted observations (intention, utterance; with minimal trial metadata like `trial` and `step_idx`) and re-inferrs beliefs starting from `LexiconPrior`.
+- Belief update uses adaptive weights: $\log posterior \propto \alpha_t \log prior + \beta_t \log likelihood$, where $\alpha_t,\beta_t$ depend on transmission fidelity (e.g., communication accuracy).
 
 > **Question**: Does too fast abstraction cause early lock-in?
 >
@@ -43,7 +44,7 @@ Two roles: Speaker (Architect) and Listener (Builder). Both update lexicon belie
 
 **Generalization**:
 
-Freeze the final lexicon posterior and active chunks learned during training, then evaluate on held-out participants.
+Freeze the final lexicon posterior (re-inferred from accumulated transmitted observations) and active chunks learned during training, then evaluate on held-out participants.
 - Test:
   - Use the held-out tower type (`PiL`) only (2 trials per participant).
   - Evaluate on a random subset of 10 participants.

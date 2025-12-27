@@ -75,6 +75,9 @@ def update_beliefs(
     observations_df: pd.DataFrame,
     utterances: List[str],
     epsilon: float,
+    prior_weight: float = 1.0,
+    ll_weight: float = 1.0,
+    actions_fallback: Optional[List[str]] = None,
 ) -> Any:
     if observations_df is None or len(observations_df) == 0:
         return prior.copy()
@@ -84,19 +87,29 @@ def update_beliefs(
 
     for lex in prior.support():
         p0 = float(prior.score(lex))
-        prior_term = float(np.log(max(p0, 1e-12)))
+        prior_term = float(prior_weight) * float(np.log(max(p0, 1e-12)))
         ll = 0.0
         for _, row in observations_df.iterrows():
             utt = str(row["utterance"])
             intent = str(row["intention"])
-            resp = str(row["response"])
-            row_actions_obj = row["actions"] if "actions" in row else []
-            row_actions = [str(x) for x in list(row_actions_obj)]
+            
+            # Support missing response: use intention as observed action
+            if "response" in row and pd.notna(row["response"]):
+                resp = str(row["response"])
+            else:
+                resp = str(intent)
+            
+            # Actions fallback for observation-only datasets
+            row_actions_obj = row["actions"] if "actions" in row else actions_fallback
+            row_actions = [str(x) for x in list(row_actions_obj)] if row_actions_obj is not None else []
+            
             if role == "architect":
-                ll += float(np.log(B0(utt, lex, actions=row_actions, epsilon=epsilon).score(resp)))
+                if row_actions:
+                    ll += float(np.log(B0(utt, lex, actions=row_actions, epsilon=epsilon).score(resp)))
             else:
                 ll += float(np.log(A0(intent, lex, utterances=utterances, epsilon=epsilon).score(utt)))
-        posterior.update({lex: prior_term + ll})
+        
+        posterior.update({lex: prior_term + float(ll_weight) * ll})
 
     posterior.renormalize()
     posterior.from_logspace()
