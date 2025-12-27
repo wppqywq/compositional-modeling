@@ -4,7 +4,7 @@ This repository is a personal working copy of the original project [`cogtoolslab
 
 For the original documentation, see [`README_original.md`](./README_original.md).
 
-Update 2025-12-27: Notebook 5 and 6 chains use observation-only cultural transmission (no posterior inheritance) with adaptive prior and likelihood weighting.
+**Update 2025-12-27**: Notebook 5 and 6 chains use observation-only cultural transmission (no posterior inheritance) with adaptive prior and likelihood weighting.
 
 ---
 
